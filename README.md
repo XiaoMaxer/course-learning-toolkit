@@ -18,7 +18,7 @@
 
 ## 文件说明
 
-- `fif-auto-study-helper.user.js`：可直接安装到 Tampermonkey 的完整脚本。
+- `course-learning-toolkit.user.js`：可直接安装到 Tampermonkey 的完整脚本。
 - `README.md`：安装、配置与使用教程。
 
 ## 一、安装环境
@@ -39,7 +39,7 @@
 
 ### 方法 A：从 GitHub 安装（推荐）
 
-1. 点击打开 [油猴脚本安装地址](https://raw.githubusercontent.com/XiaoMaxer/course-learning-toolkit/main/fif-auto-study-helper.user.js)，或在本仓库打开 [`fif-auto-study-helper.user.js`](./fif-auto-study-helper.user.js) 后点击 **Raw**。
+1. 点击打开 [油猴脚本安装地址](https://raw.githubusercontent.com/XiaoMaxer/course-learning-toolkit/main/course-learning-toolkit.user.js)，或在本仓库打开 [`course-learning-toolkit.user.js`](./course-learning-toolkit.user.js) 后点击 **Raw**。
 2. Tampermonkey 会自动弹出用户脚本安装页。
 3. 核对脚本名称、版本和匹配网站后，点击 **安装**。
 
@@ -49,7 +49,7 @@
 
 1. 下载或克隆本仓库，确认脚本扩展名为 `.user.js`，不要改成 `.txt`。
 2. 在 Tampermonkey 扩展详情中开启「允许访问文件 URL」。
-3. 将 `fif-auto-study-helper.user.js` 拖入 Edge 窗口，或在地址栏打开它的 `file:///` 地址。
+3. 将 `course-learning-toolkit.user.js` 拖入 Edge 窗口，或在地址栏打开它的 `file:///` 地址。
 4. 在 Tampermonkey 安装页点击 **安装**。
 
 如果浏览器只显示源码而没有弹出安装页，可在 Tampermonkey 管理面板中新建脚本，将文件全部内容粘贴进去并保存。
