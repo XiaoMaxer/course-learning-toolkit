@@ -39,7 +39,7 @@
 
 ### 方法 A：从 GitHub 安装（推荐）
 
-1. 点击打开 [油猴脚本安装地址](https://raw.githubusercontent.com/XiaoMaxer/fif-auto-study-helper/main/fif-auto-study-helper.user.js)，或在本仓库打开 [`fif-auto-study-helper.user.js`](./fif-auto-study-helper.user.js) 后点击 **Raw**。
+1. 点击打开 [油猴脚本安装地址](https://raw.githubusercontent.com/XiaoMaxer/course-learning-toolkit/main/fif-auto-study-helper.user.js)，或在本仓库打开 [`fif-auto-study-helper.user.js`](./fif-auto-study-helper.user.js) 后点击 **Raw**。
 2. Tampermonkey 会自动弹出用户脚本安装页。
 3. 核对脚本名称、版本和匹配网站后，点击 **安装**。
 

@@ -2,7 +2,7 @@
 // @name         FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
-// @namespace    https://github.com/XiaoMaxer/fif-auto-study-helper
+// @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
 // @version      1.5.0
 // @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护。
 // @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护。
