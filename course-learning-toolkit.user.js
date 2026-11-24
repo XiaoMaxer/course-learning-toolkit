@@ -3,7 +3,7 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
-// @version      1.7.0
+// @version      1.7.1
 // @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
 // @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
 // @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
@@ -1821,6 +1821,11 @@
         return /时间过短|暂无可测评|已经掌握|最短时间间隔/.test(String(msg || ''));
     }
 
+    // 「暂无可测评题目」单独识别：可通过强制重选学习目标刷新题池，不应直接终止
+    function isNoTopicMessage(msg) {
+        return /暂无可测评|无可测评题目|暂无题目/.test(String(msg || ''));
+    }
+
     function closeEvaluationMessageBox() {
         const btn = Array.from(document.querySelectorAll('.el-message-box__btns button, .el-message-box__headerbtn'))
             .find(isVisibleEl);
@@ -1863,18 +1868,20 @@
 
     // 测评前置校验与补全：首次测评时学习目标为空（覆盖显示「课程默认」），直接点「开始测评」会被平台拒绝
     // （verifyPushTopic 返回 isNextQue=false → 暂无可测评题目）。这里自动完成「更改 → 全选 → 确定」。
-    async function prepareEvaluationScope(dialog) {
+    async function prepareEvaluationScope(dialog, force) {
         if (!dialog) return false;
         const scopeText = () => String((dialog.querySelector('.learningTarget .num') || {}).innerText || '').replace(/\s+/g, '');
         const hasScope = () => {
             const t = scopeText();
             return /\d+个/.test(t) && !/^0个/.test(t);
         };
-        if (hasScope()) {
+        if (!force && hasScope()) {
             log(`测评覆盖范围已就绪：${scopeText()}`, 'info');
             return true;
         }
-        log(`测评覆盖范围为「${scopeText() || '课程默认'}」，正在自动选择学习目标…`, 'info');
+        log(force
+            ? `强制重新选择学习目标（当前覆盖「${scopeText() || '课程默认'}」），刷新可测评题目…`
+            : `测评覆盖范围为「${scopeText() || '课程默认'}」，正在自动选择学习目标…`, 'info');
 
         const changeBtn = dialog.querySelector('.learningTarget .btn');
         if (!changeBtn) {
@@ -2304,14 +2311,25 @@
             await prepareEvaluationScope(evaluationDialogEl());
         }
 
-        // 封面：点击「开始测评」
-        if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
-            let startBtn = null;
+        // 封面：点击「开始测评」并等待题目/报告。
+        // 平台在学习目标未变化时可能对旧题池返回「暂无可测评题目」，此时按手动可行路径
+        // 强制重走「更改 → 全选 → 确定」刷新题池后重试（最多 2 次）；其余拦截提示仍直接终止。
+        let ready = false;
+        for (let attempt = 0; attempt < 2 && !ready; attempt++) {
+            if (evaluationAnsweringEl() || isEvaluationReportVisible()) { ready = true; break; }
+            if (evalStopRequested()) return { status: 'aborted', reason: 'manual-stop' };
+            if (attempt > 0) {
+                await prepareEvaluationScope(evaluationDialogEl(), true);
+                await sleep(600);
+            }
+
+            let startBtn = null, noTopic = false;
             for (let i = 0; i < 25; i++) {
                 const dialog = evaluationDialogEl();
                 startBtn = dialog && findEvaluationButton(/^开始测评$/, dialog);
                 if (startBtn) break;
                 const msg = evaluationMessageText();
+                if (isNoTopicMessage(msg)) { noTopic = true; closeEvaluationMessageBox(); break; }
                 if (isEvaluationBlockedMessage(msg)) {
                     log(`平台提示：${msg.slice(0, 160)}`, 'warn');
                     closeEvaluationMessageBox();
@@ -2319,33 +2337,43 @@
                 }
                 await sleep(400);
             }
-            if (!startBtn) {
+            if (!startBtn && !noTopic) {
                 log('未找到【开始测评】按钮，已停止本次测评', 'warn');
                 return { status: 'aborted', reason: 'no-start-button' };
             }
-            if (evalStopRequested()) return { status: 'aborted', reason: 'manual-stop' };
-            await sleep(600 + Math.floor(Math.random() * 900));
-            fireHumanClick(startBtn);
-            log('已点击【开始测评】，等待题目加载…', 'info');
-        }
+            if (!noTopic) {
+                await sleep(600 + Math.floor(Math.random() * 900));
+                fireHumanClick(startBtn);
+                log('已点击【开始测评】，等待题目加载…', 'info');
 
-        // 等待答题界面或报告出现
-        let ready = false;
-        for (let i = 0; i < 50; i++) {
-            if (isEvaluationReportVisible()) { ready = true; break; }
-            const q = readEvaluationQuestionDom();
-            if ((q && q.items && q.items.length) || findEvaluationButton(/^显示报告$/)) { ready = true; break; }
-            const msg = evaluationMessageText();
-            if (isEvaluationBlockedMessage(msg)) {
-                log(`平台提示：${msg.slice(0, 160)}`, 'warn');
-                closeEvaluationMessageBox();
-                return { status: 'aborted', reason: 'blocked' };
+                // 等待答题界面或报告出现
+                for (let i = 0; i < 50; i++) {
+                    if (isEvaluationReportVisible()) { ready = true; break; }
+                    const q = readEvaluationQuestionDom();
+                    if ((q && q.items && q.items.length) || findEvaluationButton(/^显示报告$/)) { ready = true; break; }
+                    const msg = evaluationMessageText();
+                    if (isNoTopicMessage(msg)) { noTopic = true; closeEvaluationMessageBox(); break; }
+                    if (isEvaluationBlockedMessage(msg)) {
+                        log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                        closeEvaluationMessageBox();
+                        return { status: 'aborted', reason: 'blocked' };
+                    }
+                    await sleep(700);
+                }
             }
-            await sleep(700);
+            if (noTopic) {
+                log(attempt === 0
+                    ? '平台提示【暂无可测评题目】，将重新选择学习目标刷新题池后重试'
+                    : '重新选择学习目标后仍【暂无可测评题目】', 'warn');
+                continue;
+            }
+            if (!ready) {
+                log('测评题目界面未加载：' + describePracticeDom(), 'warn');
+                return { status: 'aborted', reason: 'questions-not-ready' };
+            }
         }
         if (!ready) {
-            log('测评题目界面未加载：' + describePracticeDom(), 'warn');
-            return { status: 'aborted', reason: 'questions-not-ready' };
+            return { status: 'aborted', reason: 'no-topic-after-retry' };
         }
 
         const result = await autoAnswerEvaluationDom();
