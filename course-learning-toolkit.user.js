@@ -3,7 +3,7 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
-// @version      1.7.1
+// @version      1.7.2
 // @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
 // @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
 // @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
@@ -1908,11 +1908,28 @@
             await sleep(400);
         }
 
-        const selectAll = setDlg.querySelector('.set-left .set-content-title .link') ||
+        const findSelectAll = () => setDlg.querySelector('.set-left .set-content-title .link') ||
             Array.from(setDlg.querySelectorAll('.set-left .link')).find(el => /全选/.test(String(el.innerText || '')));
+        let selectAll = findSelectAll();
         if (!selectAll) {
             log('未找到【全选】按钮，已中止本次测评', 'warn');
             return false;
+        }
+        if (force && /取消全选/.test(String(selectAll.innerText || ''))) {
+            // 已全选状态：先取消全选再重新全选，让学习目标发生真实变更，强制平台刷新可测题池
+            log('当前已是全选，先【取消全选】再重新【全选】以刷新题池…', 'info');
+            fireHumanClick(selectAll);
+            for (let i = 0; i < 20; i++) {
+                await sleep(300);
+                selectAll = findSelectAll();
+                if (selectAll && !/取消全选/.test(String(selectAll.innerText || ''))) break;
+            }
+            await sleep(400);
+            selectAll = findSelectAll();
+            if (!selectAll) {
+                log('取消全选后未找到【全选】按钮，已中止本次测评', 'warn');
+                return false;
+            }
         }
         if (!/取消全选/.test(String(selectAll.innerText || ''))) fireHumanClick(selectAll);
 
