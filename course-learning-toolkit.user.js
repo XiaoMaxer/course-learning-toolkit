@@ -3,9 +3,9 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
-// @version      1.6.0
-// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题。
-// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题。
+// @version      1.7.0
+// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
+// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
 // @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
 // @author       Antigravity
 // @match        https://icourse.fifedu.com/*
@@ -160,7 +160,10 @@
         aiMinDelayMs: 2500,        // 每题提交前的最短模拟思考时间
         aiMaxDelayMs: 6000,        // 每题提交前的最长模拟思考时间
         aiMaxQuestions: 50,        // 单次练习最多自动作答题目数
-        aiAutoSubmit: true         // 答完后自动点击「显示报告/交卷」
+        aiAutoSubmit: true,        // 答完后自动点击「显示报告/交卷」
+        // ---- 熟练度测评配置 ----
+        evalLoop: false,           // 循环测试：本次熟练度低于目标值时自动再测一轮（默认关闭）
+        evalTargetMastery: ''      // 目标熟练度指标（选填，0-100 的整数）
     };
 
     const state = {
@@ -180,7 +183,9 @@
             aiMinDelayMs: Number(Storage.get('aiMinDelayMs', DEFAULT_CONFIG.aiMinDelayMs)) || DEFAULT_CONFIG.aiMinDelayMs,
             aiMaxDelayMs: Number(Storage.get('aiMaxDelayMs', DEFAULT_CONFIG.aiMaxDelayMs)) || DEFAULT_CONFIG.aiMaxDelayMs,
             aiMaxQuestions: Number(Storage.get('aiMaxQuestions', DEFAULT_CONFIG.aiMaxQuestions)) || DEFAULT_CONFIG.aiMaxQuestions,
-            aiAutoSubmit: Storage.get('aiAutoSubmit', DEFAULT_CONFIG.aiAutoSubmit)
+            aiAutoSubmit: Storage.get('aiAutoSubmit', DEFAULT_CONFIG.aiAutoSubmit),
+            evalLoop: Storage.get('evalLoop', DEFAULT_CONFIG.evalLoop),
+            evalTargetMastery: Storage.get('evalTargetMastery', DEFAULT_CONFIG.evalTargetMastery)
         },
         skipSections: new Set(Storage.get('skipSections', [])),
         completedCourses: new Set(Storage.get('completedCourses', [])),
@@ -189,6 +194,7 @@
         lastIndexUrl: Storage.get('lastIndexUrl', ''),
         busy: false,
         evaluationRunning: false,
+        evalStopRequested: false,
         stuckCounter: 0,
         statusText: '就绪，点击「开始刷课」启动自动化',
         logs: []
@@ -2065,6 +2071,84 @@
         return { answered, correct, wrong, completed };
     }
 
+    // 目标熟练度输入解析：选填；一旦填写则必须是 0-100 的整数
+    function parseEvalTargetInput(raw) {
+        const s = String(raw == null ? '' : raw).trim();
+        if (!s) return { provided: false, valid: true, value: null, message: '' };
+        if (!/^\d+$/.test(s)) return { provided: true, valid: false, value: null, message: '目标熟练度需为 0-100 的整数' };
+        const n = Number(s);
+        if (!Number.isInteger(n) || n < 0 || n > 100) {
+            return { provided: true, valid: false, value: null, message: '目标熟练度需在 0-100 之间（整数）' };
+        }
+        return { provided: true, valid: true, value: n, message: '' };
+    }
+
+    // 循环判定：只有「开关开启 + 目标合法 + 本次熟练度低于目标」才继续下一轮
+    function shouldContinueEvalLoop(loopEnabled, target, mastery) {
+        if (!loopEnabled) return false;
+        if (target == null || mastery == null) return false;
+        const t = Number(target), m = Number(mastery);
+        if (!Number.isFinite(t) || !Number.isFinite(m)) return false;
+        return m < t;
+    }
+
+    function getEvaluationLoopConfig() {
+        const target = parseEvalTargetInput(state.config.evalTargetMastery);
+        return {
+            enabled: !!state.config.evalLoop,
+            target,
+            // 只有开关开启且目标已填、合法时才进入循环模式，其余情况与原有单轮测评完全一致
+            active: !!state.config.evalLoop && target.provided && target.valid
+        };
+    }
+
+    function evalStopRequested() {
+        return !!state.evalStopRequested || !state.config.running;
+    }
+
+    // 从测评报告中读取本次熟练度（掌握度）数值，读取失败返回 null
+    function extractEvaluationMastery() {
+        const report = Array.from(document.querySelectorAll('.ReportBox')).find(isVisibleEl);
+        const dialog = evaluationDialogEl();
+        const scopes = [];
+        if (report) scopes.push(report);
+        if (dialog && dialog !== report) scopes.push(dialog);
+
+        // 报告中的掌握度仪表盘：.gaugeCon > .textCon > .n = 数值%，.b = 「掌握度」
+        for (const scope of scopes) {
+            const gauges = Array.from(scope.querySelectorAll('.gaugeCon'));
+            for (const g of gauges) {
+                const label = String((g.querySelector('.textCon .b') || {}).innerText || '').trim();
+                if (label && !/掌握度/.test(label)) continue;
+                const txt = String((g.querySelector('.textCon .n') || {}).innerText || g.innerText || '');
+                const m = txt.match(/(\d+(?:\.\d+)?)\s*%/);
+                if (m) return Number(m[1]);
+            }
+        }
+        // 兜底：报告文本里的「掌握度 xx%」（排除「掌握度变化」）
+        const text = report ? String(report.innerText || '') : '';
+        const m2 = text.match(/掌握度(?!变化)[^0-9%]{0,12}(\d+(?:\.\d+)?)\s*%/);
+        if (m2) return Number(m2[1]);
+        // 再兜底：课程首页掌握度卡片
+        const home = document.querySelector('.knowledge-mastery');
+        if (home) {
+            const m3 = String(home.innerText || '').match(/(\d+(?:\.\d+)?)\s*%/);
+            if (m3) return Number(m3[1]);
+        }
+        return null;
+    }
+
+    // 关闭测评报告并返回课程首页（与原有单轮测评的收尾动作一致）
+    async function closeEvaluationReport() {
+        await sleep(1500);
+        const enterBtn = findReportButton(/^进入学习$/);
+        if (enterBtn) {
+            fireHumanClick(enterBtn);
+            log('已关闭测评报告，返回课程首页', 'info');
+            await sleep(1200);
+        }
+    }
+
     async function runCourseEvaluation() {
         if (state.evaluationRunning) return;
         ensureEvaluationEntry();
@@ -2076,114 +2160,203 @@
         if (!String(state.config.aiApiKey || '').trim()) {
             log('未配置 AI API Key：优先使用平台下发的标准答案，平台未下发答案的题目将暂停作答', 'warn');
         }
-        let trigger = findEvaluationTrigger();
-        for (let i = 0; i < 16 && !trigger; i++) {
-            await sleep(500);
-            trigger = findEvaluationTrigger();
-        }
-        if (!trigger) {
-            log('未找到【测评评估掌握度】入口：请先进入课程首页，并等掌握度卡片加载完成', 'warn');
+
+        const loopCfg = getEvaluationLoopConfig();
+        if (loopCfg.enabled && loopCfg.target.provided && !loopCfg.target.valid) {
+            log(`目标熟练度指标无效：${loopCfg.target.message}，请修正后再开始测评`, 'warn');
+            updateEvalTargetHint();
             return;
         }
-        if (evaluationDialogEl() || evaluationAnsweringEl()) {
-            log('测评弹窗已经打开，直接开始自动答题', 'info');
+        if (loopCfg.enabled && !loopCfg.target.provided) {
+            log('循环测试已开启，但未填写目标熟练度指标：本次按单轮测评执行', 'info');
+        }
+        if (loopCfg.active) {
+            log(`循环测试已开启：目标熟练度 ${loopCfg.target.value}%，未达到将自动开始新一轮完整测评；达到目标、手动停止或出现异常时立即终止`, 'info');
         }
 
         state.evaluationRunning = true;
+        state.evalStopRequested = false;
         const prevRunning = state.config.running;
         state.config.running = true;
         updatePanelUI();
 
+        const maxRounds = 20; // 安全上限，避免异常情况下无限循环
+        let roundNo = 0;
         try {
-            if (!evaluationDialogEl() && !evaluationAnsweringEl()) {
-                log('正在打开【测评评估掌握度】...', 'info');
-                fireHumanClick(trigger);
+            while (true) {
+                roundNo++;
+                if (evalStopRequested()) {
+                    log('已手动停止测评，终止流程', 'warn');
+                    break;
+                }
+                if (loopCfg.active) log(`—— 开始第 ${roundNo} 轮测评 ——`, 'info');
 
-                let dialog = null;
-                for (let i = 0; i < 40; i++) {
-                    dialog = evaluationDialogEl();
-                    if (dialog) break;
-                    const msg = evaluationMessageText();
-                    if (isEvaluationBlockedMessage(msg)) {
-                        log(`平台提示：${msg.slice(0, 160)}`, 'warn');
-                        closeEvaluationMessageBox();
-                        return;
+                let round;
+                try {
+                    round = await runSingleEvaluationRound();
+                } catch (err) {
+                    log(`第 ${roundNo} 轮测评出现异常：${err && err.message ? err.message : err}，已终止循环`, 'error');
+                    break;
+                }
+
+                if (!round || round.status !== 'completed') {
+                    if (round && round.reason === 'manual-stop') {
+                        log('已手动停止测评，终止流程', 'warn');
+                    } else if (loopCfg.active) {
+                        log(`第 ${roundNo} 轮测评未完成（${round && round.reason ? round.reason : '未知原因'}），终止循环`, 'warn');
                     }
+                    break;
+                }
+
+                const mastery = round.mastery;
+                if (!loopCfg.active) {
+                    // 单轮模式：与原有版本完全一致，看完报告后返回课程首页
+                    await closeEvaluationReport();
+                    break;
+                }
+
+                if (mastery == null) {
+                    log('未能读取本次测评熟练度数值，为避免无限重复已终止循环', 'warn');
+                    await closeEvaluationReport();
+                    break;
+                }
+                log(`第 ${roundNo} 轮测评熟练度：${mastery}%（目标 ${loopCfg.target.value}%）`, 'info');
+
+                if (!shouldContinueEvalLoop(true, loopCfg.target.value, mastery)) {
+                    log(`熟练度已达目标（${mastery}% ≥ ${loopCfg.target.value}%），循环测试结束`, 'success');
+                    await closeEvaluationReport();
+                    break;
+                }
+                if (evalStopRequested()) {
+                    log('已手动停止测评，终止循环', 'warn');
+                    break;
+                }
+                if (roundNo >= maxRounds) {
+                    log(`已连续测评 ${maxRounds} 轮仍未达到目标，为避免过度请求已终止循环`, 'warn');
+                    await closeEvaluationReport();
+                    break;
+                }
+
+                log(`本次熟练度 ${mastery}% 低于目标 ${loopCfg.target.value}%，将自动开始第 ${roundNo + 1} 轮完整测评（学习目标校验 → 开始测评 → 自动答题 → 查看报告）`, 'info');
+                const againBtn = findReportButton(/^再测一次$/);
+                if (!againBtn) {
+                    log('未找到【再测一次】按钮，无法继续循环，已终止', 'warn');
+                    await closeEvaluationReport();
+                    break;
+                }
+                fireHumanClick(againBtn);
+                // 等待平台从报告页切回测评封面，再进入下一轮完整流程
+                for (let i = 0; i < 20; i++) {
                     await sleep(500);
+                    if (!isEvaluationReportVisible()) break;
                 }
-                if (!dialog) {
-                    log('测评弹窗未打开（可能距离上次测评时间过短或暂无可测评题目）', 'warn');
-                    return;
-                }
-            }
-
-            // 封面：先做覆盖范围前置校验与补全（修复必须手动「更改→全选→确定」才能测评的问题）
-            if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
-                await prepareEvaluationScope(evaluationDialogEl());
-            }
-
-            // 封面：点击「开始测评」
-            if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
-                let startBtn = null;
-                for (let i = 0; i < 25; i++) {
-                    const dialog = evaluationDialogEl();
-                    startBtn = dialog && findEvaluationButton(/^开始测评$/, dialog);
-                    if (startBtn) break;
-                    const msg = evaluationMessageText();
-                    if (isEvaluationBlockedMessage(msg)) {
-                        log(`平台提示：${msg.slice(0, 160)}`, 'warn');
-                        closeEvaluationMessageBox();
-                        return;
-                    }
-                    await sleep(400);
-                }
-                if (!startBtn) {
-                    log('未找到【开始测评】按钮，已停止本次测评', 'warn');
-                    return;
-                }
-                await sleep(600 + Math.floor(Math.random() * 900));
-                fireHumanClick(startBtn);
-                log('已点击【开始测评】，等待题目加载…', 'info');
-            }
-
-            // 等待答题界面或报告出现
-            let ready = false;
-            for (let i = 0; i < 50; i++) {
-                if (isEvaluationReportVisible()) { ready = true; break; }
-                const q = readEvaluationQuestionDom();
-                if ((q && q.items && q.items.length) || findEvaluationButton(/^显示报告$/)) { ready = true; break; }
-                const msg = evaluationMessageText();
-                if (isEvaluationBlockedMessage(msg)) {
-                    log(`平台提示：${msg.slice(0, 160)}`, 'warn');
-                    closeEvaluationMessageBox();
-                    return;
-                }
-                await sleep(700);
-            }
-            if (!ready) {
-                log('测评题目界面未加载：' + describePracticeDom(), 'warn');
-                return;
-            }
-
-            const result = await autoAnswerEvaluationDom();
-            if (result && result.completed) {
-                const box = Array.from(document.querySelectorAll('.ReportBox')).find(isVisibleEl);
-                const summary = box ? String(box.innerText || '').replace(/\s+/g, ' ').slice(0, 180) : '';
-                if (summary) log(`测评报告：${summary}`, 'success');
-                await sleep(1500);
-                const enterBtn = findReportButton(/^进入学习$/);
-                if (enterBtn) {
-                    fireHumanClick(enterBtn);
-                    log('已关闭测评报告，返回课程首页', 'info');
-                    await sleep(1200);
-                }
+                await sleep(800);
             }
         } finally {
             state.config.running = prevRunning;
             state.evaluationRunning = false;
+            state.evalStopRequested = false;
             saveConfig();
             updatePanelUI();
         }
+    }
+
+    // 单轮完整测评：打开入口 → 学习目标校验补全 → 开始测评 → 自动答题 → 读取报告
+    // 循环模式下每一轮都完整执行本函数，保证与原有单轮流程、交互逻辑完全一致
+    async function runSingleEvaluationRound() {
+        if (evaluationDialogEl() || evaluationAnsweringEl()) {
+            log('测评弹窗已经打开，直接开始自动答题', 'info');
+        } else {
+            let trigger = findEvaluationTrigger();
+            for (let i = 0; i < 16 && !trigger; i++) {
+                await sleep(500);
+                trigger = findEvaluationTrigger();
+            }
+            if (!trigger) {
+                log('未找到【测评评估掌握度】入口：请先进入课程首页，并等掌握度卡片加载完成', 'warn');
+                return { status: 'aborted', reason: 'no-entry' };
+            }
+            log('正在打开【测评评估掌握度】...', 'info');
+            fireHumanClick(trigger);
+
+            let dialog = null;
+            for (let i = 0; i < 40; i++) {
+                dialog = evaluationDialogEl();
+                if (dialog) break;
+                const msg = evaluationMessageText();
+                if (isEvaluationBlockedMessage(msg)) {
+                    log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                    closeEvaluationMessageBox();
+                    return { status: 'aborted', reason: 'blocked' };
+                }
+                await sleep(500);
+            }
+            if (!dialog) {
+                log('测评弹窗未打开（可能距离上次测评时间过短或暂无可测评题目）', 'warn');
+                return { status: 'aborted', reason: 'dialog-not-open' };
+            }
+        }
+
+        if (evalStopRequested()) return { status: 'aborted', reason: 'manual-stop' };
+
+        // 封面：先做覆盖范围前置校验与补全（修复必须手动「更改→全选→确定」才能测评的问题）
+        if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
+            await prepareEvaluationScope(evaluationDialogEl());
+        }
+
+        // 封面：点击「开始测评」
+        if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
+            let startBtn = null;
+            for (let i = 0; i < 25; i++) {
+                const dialog = evaluationDialogEl();
+                startBtn = dialog && findEvaluationButton(/^开始测评$/, dialog);
+                if (startBtn) break;
+                const msg = evaluationMessageText();
+                if (isEvaluationBlockedMessage(msg)) {
+                    log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                    closeEvaluationMessageBox();
+                    return { status: 'aborted', reason: 'blocked' };
+                }
+                await sleep(400);
+            }
+            if (!startBtn) {
+                log('未找到【开始测评】按钮，已停止本次测评', 'warn');
+                return { status: 'aborted', reason: 'no-start-button' };
+            }
+            if (evalStopRequested()) return { status: 'aborted', reason: 'manual-stop' };
+            await sleep(600 + Math.floor(Math.random() * 900));
+            fireHumanClick(startBtn);
+            log('已点击【开始测评】，等待题目加载…', 'info');
+        }
+
+        // 等待答题界面或报告出现
+        let ready = false;
+        for (let i = 0; i < 50; i++) {
+            if (isEvaluationReportVisible()) { ready = true; break; }
+            const q = readEvaluationQuestionDom();
+            if ((q && q.items && q.items.length) || findEvaluationButton(/^显示报告$/)) { ready = true; break; }
+            const msg = evaluationMessageText();
+            if (isEvaluationBlockedMessage(msg)) {
+                log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                closeEvaluationMessageBox();
+                return { status: 'aborted', reason: 'blocked' };
+            }
+            await sleep(700);
+        }
+        if (!ready) {
+            log('测评题目界面未加载：' + describePracticeDom(), 'warn');
+            return { status: 'aborted', reason: 'questions-not-ready' };
+        }
+
+        const result = await autoAnswerEvaluationDom();
+        if (!result || !result.completed) {
+            return { status: 'aborted', reason: evalStopRequested() ? 'manual-stop' : 'incomplete', result };
+        }
+        const box = Array.from(document.querySelectorAll('.ReportBox')).find(isVisibleEl);
+        const summary = box ? String(box.innerText || '').replace(/\s+/g, ' ').slice(0, 180) : '';
+        if (summary) log(`测评报告：${summary}`, 'success');
+        const mastery = extractEvaluationMastery();
+        return { status: 'completed', mastery, summary, result };
     }
 
     function findActionButton(pattern) {
@@ -2923,6 +3096,49 @@
         .fif-ai-test:hover {
             opacity: 0.9;
         }
+        .fif-risk-box {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            background: rgba(127, 29, 29, .28);
+            border: 1px solid #b91c1c;
+            border-radius: 7px;
+            padding: 8px 9px;
+        }
+        .fif-risk-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: #fca5a5;
+        }
+        .fif-risk-box label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #fecaca;
+            cursor: pointer;
+        }
+        .fif-risk-desc {
+            font-size: 11px;
+            line-height: 1.5;
+            color: #fca5a5;
+            word-break: break-all;
+        }
+        .fif-eval-hint {
+            font-size: 11px;
+            line-height: 1.45;
+            min-height: 15px;
+            color: #94a3b8;
+            word-break: break-all;
+        }
+        .fif-eval-hint.fif-invalid {
+            color: #f87171;
+            font-weight: 600;
+        }
+        #fif-cfg-eval-target.fif-input-invalid {
+            border-color: #f87171 !important;
+            box-shadow: 0 0 0 1px rgba(248, 113, 113, .35);
+        }
         .fif-log-list {
             background: #0f172a;
             border: 1px solid #334155;
@@ -2988,10 +3204,14 @@
             <div class="fif-body">
                 <div class="fif-status-box" id="fif-status-text">${state.statusText}</div>
                 <div class="fif-controls">
-                    <label title="直接调用 Vue 底层进度接口秒过视频/文档/PPT"><input type="checkbox" id="fif-cfg-fast" ${state.config.fastMode ? 'checked' : ''}> 极速秒刷模式</label>
                     <label title="遇到自适应练习自动开始，调用 AI 逐题作答并交卷"><input type="checkbox" id="fif-cfg-exercise" ${state.config.autoExercise ? 'checked' : ''}> 自动完成练习</label>
                     <label title="自动跳过所有单元检测与期中期末测验"><input type="checkbox" id="fif-cfg-skip-exam" ${state.config.skipExams ? 'checked' : ''}> 跳过单元检测</label>
-                    <label title="当前课程全部刷完后自动返回工作台进入下一门课"><input type="checkbox" id="fif-cfg-next-course" ${state.config.autoNextCourse ? 'checked' : ''}> 多课程连刷</label>
+                    <label title="仅自动跳转课程/展开课程列表，不伪造学习数据，本身不属于高风险；但会让其他功能在所有课程上无人值守连续执行，放大风控暴露"><input type="checkbox" id="fif-cfg-next-course" ${state.config.autoNextCourse ? 'checked' : ''}> 多课程连刷</label>
+                </div>
+                <div class="fif-risk-box">
+                    <div class="fif-risk-title">⚠ 高风险功能（可能被平台风控识别，谨慎开启）</div>
+                    <label title="不实际观看，直接调用 Vue 底层进度接口把视频/文档/PPT 上报为 100% 完成：进度与学习时长严重不符，最容易被平台风控或审计识别，可能导致学习记录作废、账号被限制"><input type="checkbox" id="fif-cfg-fast" ${state.config.fastMode ? 'checked' : ''}> 极速秒刷模式</label>
+                    <div class="fif-risk-desc">风险说明：跳过真实观看直接上报 100% 进度，属于最明显的异常学习行为。担心风险时请关闭本项，改用「视频常规播放倍速」。</div>
                 </div>
                 <div class="fif-rate-row">
                     <span>视频常规播放倍速：</span>
@@ -3032,6 +3252,14 @@
                 <div class="fif-btn-row">
                     <button class="fif-btn fif-btn-secondary" id="fif-clear-skip" title="清空已标记跳过的异常小节缓存">清空跳过缓存 (<span id="fif-skip-count">${state.skipSections.size}</span>)</button>
                     <button class="fif-btn fif-btn-secondary" id="fif-go-home" title="返回学习空间课程列表首页">返回学习空间</button>
+                </div>
+                <div class="fif-ai-box" id="fif-eval-box">
+                    <div class="fif-ai-title">
+                        <span>熟练度测评</span>
+                        <label title="开启后：本次测评熟练度低于目标值时自动开始新一轮完整测评；达到目标、手动停止或出现异常时立即终止"><input type="checkbox" id="fif-cfg-eval-loop" ${state.config.evalLoop ? 'checked' : ''}> 循环测试</label>
+                    </div>
+                    <input type="text" id="fif-cfg-eval-target" inputmode="numeric" placeholder="目标熟练度指标（选填，0-100 整数）" autocomplete="off">
+                    <div class="fif-eval-hint" id="fif-eval-target-hint"></div>
                 </div>
                 <div class="fif-btn-row">
                     <button class="fif-btn fif-btn-secondary" id="fif-run-eval" title="在课程首页点击「测评评估掌握度」，自动完成测评答题">🎯 测评评估掌握度（自动答题）</button>
@@ -3080,6 +3308,9 @@
         document.getElementById('fif-cfg-fast').addEventListener('change', (e) => {
             state.config.fastMode = e.target.checked;
             saveConfig();
+            if (state.config.fastMode) {
+                log('【高风险】极速秒刷已开启：不观看直接上报 100% 进度，最易被平台风控识别；担心风险请关闭并改用常规倍速', 'warn');
+            }
         });
         document.getElementById('fif-cfg-exercise').addEventListener('change', (e) => {
             state.config.autoExercise = e.target.checked;
@@ -3169,10 +3400,32 @@
             location.href = 'https://icourse.fifedu.com/istp-manage/work/home';
         });
 
+        // ---- 熟练度测评配置事件 ----
+        const evalLoopInput = document.getElementById('fif-cfg-eval-loop');
+        const evalTargetInput = document.getElementById('fif-cfg-eval-target');
+        if (evalTargetInput) evalTargetInput.value = state.config.evalTargetMastery || '';
+        updateEvalTargetHint();
+        if (evalLoopInput) evalLoopInput.addEventListener('change', (e) => {
+            state.config.evalLoop = e.target.checked;
+            saveConfig();
+            updateEvalTargetHint();
+            log(state.config.evalLoop
+                ? '循环测试已开启：填写目标熟练度后，未达到目标将自动开始新一轮完整测评；达到目标、手动停止或异常时终止'
+                : '循环测试已关闭，恢复为单轮测评', 'info');
+        });
+        if (evalTargetInput) evalTargetInput.addEventListener('input', (e) => {
+            state.config.evalTargetMastery = e.target.value;
+            saveConfig();
+            updateEvalTargetHint();
+        });
+
         document.getElementById('fif-run-eval').addEventListener('click', async (e) => {
             const btn = e.currentTarget;
             if (state.evaluationRunning) {
-                log('测评自动答题正在进行中…', 'warn');
+                state.evalStopRequested = true;
+                state.config.running = false;
+                log('已请求停止测评：当前步骤结束后立即终止，不再开始新一轮', 'warn');
+                updatePanelUI();
                 return;
             }
             btn.disabled = true;
@@ -3180,6 +3433,7 @@
                 await runCourseEvaluation();
             } finally {
                 btn.disabled = false;
+                updatePanelUI();
             }
         });
 
@@ -3233,7 +3487,36 @@
             ).join('');
         }
         const evalBtn = document.getElementById('fif-run-eval');
-        if (evalBtn) evalBtn.disabled = state.evaluationRunning;
+        if (evalBtn) {
+            evalBtn.disabled = false;
+            evalBtn.textContent = state.evaluationRunning ? '⏹ 停止测评' : '🎯 测评评估掌握度（自动答题）';
+            evalBtn.className = `fif-btn ${state.evaluationRunning ? 'fif-btn-Primary-stop' : 'fif-btn-secondary'}`;
+            evalBtn.title = state.evaluationRunning ? '立即停止测评/循环测试' : '在课程首页点击「测评评估掌握度」，自动完成测评答题';
+        }
+    }
+
+    // 目标熟练度输入框的实时校验提示
+    function updateEvalTargetHint() {
+        const input = document.getElementById('fif-cfg-eval-target');
+        const hint = document.getElementById('fif-eval-target-hint');
+        if (!hint) return;
+        const raw = input ? input.value : state.config.evalTargetMastery;
+        const parsed = parseEvalTargetInput(raw);
+        if (!parsed.valid) {
+            hint.textContent = '⚠ ' + parsed.message;
+            hint.classList.add('fif-invalid');
+            if (input) input.classList.add('fif-input-invalid');
+            return;
+        }
+        hint.classList.remove('fif-invalid');
+        if (input) input.classList.remove('fif-input-invalid');
+        if (!parsed.provided) {
+            hint.textContent = '选填：0-100 的整数；不填则只进行单轮测评';
+        } else if (state.config.evalLoop) {
+            hint.textContent = `目标 ${parsed.value}%，未达到将自动再测一轮`;
+        } else {
+            hint.textContent = `目标 ${parsed.value}%（开启「循环测试」后生效）`;
+        }
     }
 
     // =========================================================================
