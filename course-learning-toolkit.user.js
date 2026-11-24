@@ -3,9 +3,9 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
-// @version      1.7.2
-// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
-// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止。
+// @version      1.8.4
+// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止；新增「无限循环刷熟练度」，忽略目标持续测评直到手动停止。
+// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止；新增「无限循环刷熟练度」，忽略目标持续测评直到手动停止。
 // @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
 // @author       Antigravity
 // @match        https://icourse.fifedu.com/*
@@ -163,7 +163,8 @@
         aiAutoSubmit: true,        // 答完后自动点击「显示报告/交卷」
         // ---- 熟练度测评配置 ----
         evalLoop: false,           // 循环测试：本次熟练度低于目标值时自动再测一轮（默认关闭）
-        evalTargetMastery: ''      // 目标熟练度指标（选填，0-100 的整数）
+        evalTargetMastery: '',     // 目标熟练度指标（选填，0-100 的整数）
+        evalInfinite: false        // 无限循环刷熟练度：忽略目标值，持续测评直到手动停止（默认关闭）
     };
 
     const state = {
@@ -185,7 +186,8 @@
             aiMaxQuestions: Number(Storage.get('aiMaxQuestions', DEFAULT_CONFIG.aiMaxQuestions)) || DEFAULT_CONFIG.aiMaxQuestions,
             aiAutoSubmit: Storage.get('aiAutoSubmit', DEFAULT_CONFIG.aiAutoSubmit),
             evalLoop: Storage.get('evalLoop', DEFAULT_CONFIG.evalLoop),
-            evalTargetMastery: Storage.get('evalTargetMastery', DEFAULT_CONFIG.evalTargetMastery)
+            evalTargetMastery: Storage.get('evalTargetMastery', DEFAULT_CONFIG.evalTargetMastery),
+            evalInfinite: Storage.get('evalInfinite', DEFAULT_CONFIG.evalInfinite)
         },
         skipSections: new Set(Storage.get('skipSections', [])),
         completedCourses: new Set(Storage.get('completedCourses', [])),
@@ -196,6 +198,7 @@
         evaluationRunning: false,
         evalStopRequested: false,
         stuckCounter: 0,
+        lastModalSnapshot: '',
         statusText: '就绪，点击「开始刷课」启动自动化',
         logs: []
     };
@@ -333,30 +336,133 @@
     // =========================================================================
     // 4. 通用弹窗与模态框处理
     // =========================================================================
-    async function handleModals() {
-        const isVisible = (el) => {
-            if (!el) return false;
-            const style = window.getComputedStyle(el);
-            return el.offsetWidth > 0 && el.offsetHeight > 0 &&
-                   style.display !== 'none' && style.visibility !== 'hidden';
-        };
-        const btns = Array.from(document.querySelectorAll(
-            '.el-message-box__btns button, .el-dialog button, .elMessageBox button, [class*="dialog"] button'
-        )).filter(isVisible);
+    // 弹窗容器选择器（覆盖 Element Plus 的 MessageBox / Dialog 以及平台自定义 dialog 类）
+    const MODAL_CONTAINER_SELECTORS = [
+        '.el-message-box', '.el-dialog',
+        '.el-message-box__wrapper', '.el-dialog__wrapper',
+        '.el-overlay-message-box',
+        '[class*="dialog"]', '[class*="Dialog"]'
+    ].join(', ');
+    // 允许自动点击的按钮文案（精确匹配，长度限制在 12 字内）
+    const MODAL_ACCEPT_WORDS = ['退出', '仍要退出', '确定', '确认', '离开', '我知道了', '知道了', '好的', '好', '是', '仍要学习', '继续学习', '下一步', '关闭'];
+    // 明确不点击的按钮文案（取消类操作保留给用户）
+    const MODAL_REJECT_WORDS = ['取消', '暂不', '稍后', '再想想', '继续答题', '继续作答', '继续测评'];
 
-        const targetBtn = btns.find(b => {
-            const t = (b.innerText || '').trim();
-            return t === '确定' || t === '确认' || t === '我知道了' || t === '仍要学习' || t === '下一步';
+    function modalTextOf(el) {
+        return String((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // 收集当前可见的弹窗容器（去重，避免外层遮罩与内层弹窗重复计入）
+    function visibleModals() {
+        const raw = Array.from(document.querySelectorAll(MODAL_CONTAINER_SELECTORS));
+        const out = [];
+        raw.forEach(el => {
+            if (!isVisibleEl(el)) return;
+            if (out.some(parent => parent.contains(el))) return;
+            const text = modalTextOf(el);
+            const hasBtn = !!el.querySelector('button, .el-button, [role="button"]');
+            if (!text && !hasBtn) return;
+            out.push(el);
         });
+        return out;
+    }
 
-        if (targetBtn) {
-            const text = targetBtn.innerText.trim();
-            targetBtn.click();
-            log(`自动点击弹窗按钮：【${text}】`, 'success');
-            await sleep(1200);
-            return true;
+    // 在弹窗内查找并点击匹配文案的按钮（兼容非 button 元素，如 div/span 伪按钮）
+    function clickModalButton(scope, matcher) {
+        const nodes = Array.from(scope.querySelectorAll(
+            'button, .el-button, [role="button"], .el-message-box__btns span, .el-dialog__footer span'
+        )).filter(isVisibleEl);
+        for (const node of nodes) {
+            const text = modalTextOf(node);
+            if (!matcher(text)) continue;
+            const clickable = node.closest('button, .el-button, [role="button"]') || node;
+            if (clickable.disabled || clickable.classList.contains('is-disabled')) continue;
+            fireHumanClick(clickable);
+            return text.replace(/\s+/g, '') || '按钮';
+        }
+        return '';
+    }
+
+    async function handleModals() {
+        const modals = visibleModals();
+        if (!modals.length) return false;
+
+        const isRejectText = (t) => MODAL_REJECT_WORDS.some(w => t.includes(w));
+        const isAcceptText = (t) => {
+            const compact = String(t || '').replace(/\s+/g, '');
+            if (!compact || compact.length > 12) return false;
+            if (isRejectText(compact)) return false;
+            // 单字按钮（是/好）必须完全相等，避免误匹配「是否…」等文案
+            return MODAL_ACCEPT_WORDS.some(w => (w.length === 1 ? compact === w : (compact === w || compact.includes(w))));
+        };
+
+        // 1) 「正在答题中，退出后为您暂时保留此次作答进度！」优先确认退出，否则流程会卡死
+        const exitModal = modals.find(m => /正在答题中|暂时保留|作答进度/.test(modalTextOf(m)));
+        if (exitModal) {
+            const clicked = clickModalButton(exitModal, (t) => {
+                const c = String(t || '').replace(/\s+/g, '');
+                if (!c || isRejectText(c)) return false;
+                return /退出|离开|确定|确认|^是$/.test(c);
+            });
+            if (clicked) {
+                log(`检测到【正在答题中】弹窗，已点击【${clicked}】并保留作答进度`, 'warn');
+                await sleep(1200);
+                return true;
+            }
+            const snapshot = modalTextOf(exitModal).slice(0, 160);
+            if (state.lastModalSnapshot !== snapshot) {
+                state.lastModalSnapshot = snapshot;
+                log(`检测到【正在答题中】弹窗但未找到退出按钮，内容：${snapshot}`, 'warn');
+            }
+        }
+
+        // 2) 常规确认类弹窗：确定 / 确认 / 我知道了 / 仍要学习 / 下一步 ...
+        for (const m of modals) {
+            const clicked = clickModalButton(m, isAcceptText);
+            if (clicked) {
+                log(`自动点击弹窗按钮：【${clicked}】`, 'success');
+                await sleep(1200);
+                return true;
+            }
+        }
+
+        // 3) 兜底：点击弹窗右上角关闭 X
+        for (const m of modals) {
+            const closeBtn = Array.from(m.querySelectorAll(
+                '.el-message-box__headerbtn, .el-dialog__headerbtn, .el-message-box__close, .el-dialog__close, [class*="close"]'
+            )).find(el => isVisibleEl(el) && !isRejectText(modalTextOf(el)));
+            if (closeBtn) {
+                fireHumanClick(closeBtn);
+                log('已点击弹窗右上角关闭按钮', 'warn');
+                await sleep(900);
+                return true;
+            }
+        }
+
+        // 4) 存在弹窗但无法处理：记录文本快照留证（同一内容不重复刷屏）
+        const snapshot = modals.map(modalTextOf).filter(Boolean).join(' | ').slice(0, 200);
+        if (snapshot && state.lastModalSnapshot !== snapshot) {
+            state.lastModalSnapshot = snapshot;
+            log(`存在未识别弹窗，暂不处理：${snapshot}`, 'warn');
         }
         return false;
+    }
+
+    // 测评收尾清扫：关闭残留弹窗/遮罩，避免中途退出后弹窗卡住主循环
+    async function cleanupEvaluationUi(reason = '') {
+        for (let i = 0; i < 3; i++) {
+            const handled = await handleModals();
+            if (!handled) break;
+            await sleep(400);
+        }
+        if (!visibleModals().length) {
+            // 仅在没有可见弹窗时解除遮罩点击拦截，避免影响正常页面
+            document.querySelectorAll('.el-overlay, .v-modal').forEach(el => {
+                if (isVisibleEl(el)) el.style.pointerEvents = 'none';
+            });
+            document.body.classList.remove('el-popup-parent--hidden');
+        }
+        if (reason) log(`已清理测评残留界面：${reason}`, 'warn');
     }
 
     // =========================================================================
@@ -1910,6 +2016,19 @@
 
         const findSelectAll = () => setDlg.querySelector('.set-left .set-content-title .link') ||
             Array.from(setDlg.querySelectorAll('.set-left .link')).find(el => /全选/.test(String(el.innerText || '')));
+        const readPicked = () => {
+            const t = String((setDlg.querySelector('.set-right .set-content-title') || {}).innerText || '');
+            const m = t.match(/已选[：:]\s*(\d+)/);
+            return m ? parseInt(m[1], 10) : 0;
+        };
+        const waitPicked = async (ok, times, gap) => {
+            for (let i = 0; i < times; i++) {
+                if (ok(readPicked())) return true;
+                await sleep(gap);
+            }
+            return ok(readPicked());
+        };
+
         let selectAll = findSelectAll();
         if (!selectAll) {
             log('未找到【全选】按钮，已中止本次测评', 'warn');
@@ -1919,27 +2038,33 @@
             // 已全选状态：先取消全选再重新全选，让学习目标发生真实变更，强制平台刷新可测题池
             log('当前已是全选，先【取消全选】再重新【全选】以刷新题池…', 'info');
             fireHumanClick(selectAll);
-            for (let i = 0; i < 20; i++) {
-                await sleep(300);
-                selectAll = findSelectAll();
-                if (selectAll && !/取消全选/.test(String(selectAll.innerText || ''))) break;
-            }
-            await sleep(400);
+            // 必须等「已选 N 个」真正归零并留出渲染时间，否则平台的勾选状态还没提交就点全选，会变成空操作
+            const cleared = await waitPicked(n => n === 0, 30, 400);
+            if (!cleared) log(`取消全选后已选数量未归零（${readPicked()}），仍继续尝试重新全选`, 'warn');
+            await sleep(1200 + Math.floor(Math.random() * 800));
             selectAll = findSelectAll();
             if (!selectAll) {
                 log('取消全选后未找到【全选】按钮，已中止本次测评', 'warn');
                 return false;
             }
         }
-        if (!/取消全选/.test(String(selectAll.innerText || ''))) fireHumanClick(selectAll);
 
-        let picked = 0;
-        for (let i = 0; i < 25; i++) {
-            const t = String((setDlg.querySelector('.set-right .set-content-title') || {}).innerText || '');
-            const m = t.match(/已选[：:]\s*(\d+)/);
-            picked = m ? parseInt(m[1], 10) : 0;
-            if (picked > 0) break;
-            await sleep(400);
+        // 勾选全选：点击后已选数量若仍为 0，说明 Vue 还没渲染完或点击未生效，重试点击
+        let picked = readPicked();
+        for (let attempt = 0; attempt < 4 && picked === 0; attempt++) {
+            selectAll = findSelectAll();
+            if (!selectAll) break;
+            if (!/取消全选/.test(String(selectAll.innerText || ''))) {
+                fireHumanClick(selectAll);
+                if (attempt === 0) log('已点击【全选】，等待知识点勾选完成…', 'info');
+            }
+            await sleep(900 + Math.floor(Math.random() * 500));
+            await waitPicked(n => n > 0, 12, 400);
+            picked = readPicked();
+            if (!picked && attempt < 3) {
+                log(`全选后仍未选中知识点（第 ${attempt + 1} 次尝试），稍后重试…`, 'warn');
+                await sleep(1000);
+            }
         }
         if (!picked) {
             log('全选后仍未选中任何知识点，已中止本次测评', 'warn');
@@ -1964,6 +2089,7 @@
             await sleep(500);
         }
         const ok = hasScope();
+        if (ok) await sleep(800 + Math.floor(Math.random() * 500));
         log(ok ? `学习目标已保存，测评覆盖：${scopeText()}` : `学习目标保存后覆盖范围仍为「${scopeText() || '课程默认'}」`,
             ok ? 'success' : 'warn');
         return ok;
@@ -2118,11 +2244,13 @@
 
     function getEvaluationLoopConfig() {
         const target = parseEvalTargetInput(state.config.evalTargetMastery);
+        const infinite = !!state.config.evalInfinite;
         return {
-            enabled: !!state.config.evalLoop,
+            enabled: infinite || !!state.config.evalLoop,
+            infinite,
             target,
-            // 只有开关开启且目标已填、合法时才进入循环模式，其余情况与原有单轮测评完全一致
-            active: !!state.config.evalLoop && target.provided && target.valid
+            // 无限循环模式忽略目标值；普通循环模式需要开关开启且目标已填、合法
+            active: infinite || (!!state.config.evalLoop && target.provided && target.valid)
         };
     }
 
@@ -2186,15 +2314,17 @@
         }
 
         const loopCfg = getEvaluationLoopConfig();
-        if (loopCfg.enabled && loopCfg.target.provided && !loopCfg.target.valid) {
+        if (!loopCfg.infinite && loopCfg.enabled && loopCfg.target.provided && !loopCfg.target.valid) {
             log(`目标熟练度指标无效：${loopCfg.target.message}，请修正后再开始测评`, 'warn');
             updateEvalTargetHint();
             return;
         }
-        if (loopCfg.enabled && !loopCfg.target.provided) {
+        if (!loopCfg.infinite && loopCfg.enabled && !loopCfg.target.provided) {
             log('循环测试已开启，但未填写目标熟练度指标：本次按单轮测评执行', 'info');
         }
-        if (loopCfg.active) {
+        if (loopCfg.infinite) {
+            log('【高风险】无限循环已开启：忽略目标熟练度，每轮结束自动开始下一轮完整测评，只有手动点击「停止测评」或出现平台拦截/连续失败才会终止', 'warn');
+        } else if (loopCfg.active) {
             log(`循环测试已开启：目标熟练度 ${loopCfg.target.value}%，未达到将自动开始新一轮完整测评；达到目标、手动停止或出现异常时立即终止`, 'info');
         }
 
@@ -2204,8 +2334,11 @@
         state.config.running = true;
         updatePanelUI();
 
-        const maxRounds = 20; // 安全上限，避免异常情况下无限循环
+        // 无限循环模式下放宽到 500 轮，仅作为兜底保护；普通循环仍为 20 轮
+        const maxRounds = loopCfg.infinite ? 500 : 20;
+        const retryableReasons = ['no-topic-after-retry', 'questions-not-ready', 'dialog-not-open', 'no-start-button'];
         let roundNo = 0;
+        let softFailures = 0;
         try {
             while (true) {
                 roundNo++;
@@ -2213,7 +2346,9 @@
                     log('已手动停止测评，终止流程', 'warn');
                     break;
                 }
-                if (loopCfg.active) log(`—— 开始第 ${roundNo} 轮测评 ——`, 'info');
+                if (loopCfg.active) {
+                    log(loopCfg.infinite ? `—— 开始第 ${roundNo} 轮测评（无限循环）——` : `—— 开始第 ${roundNo} 轮测评 ——`, 'info');
+                }
 
                 let round;
                 try {
@@ -2224,13 +2359,25 @@
                 }
 
                 if (!round || round.status !== 'completed') {
-                    if (round && round.reason === 'manual-stop') {
+                    const reason = (round && round.reason) || '未知原因';
+                    if (reason === 'manual-stop') {
                         log('已手动停止测评，终止流程', 'warn');
-                    } else if (loopCfg.active) {
-                        log(`第 ${roundNo} 轮测评未完成（${round && round.reason ? round.reason : '未知原因'}），终止循环`, 'warn');
+                        break;
                     }
+                    if (!loopCfg.active) break;
+                    // 题池/页面未就绪属于可自愈问题：关闭残留报告、等待后重试，避免循环被一次偶发失败打断
+                    if (retryableReasons.includes(reason) && softFailures < 2) {
+                        softFailures++;
+                        const waitSec = 6 + softFailures * 4;
+                        log(`第 ${roundNo} 轮测评未完成（${reason}），${waitSec} 秒后自动重试（第 ${softFailures}/2 次）`, 'warn');
+                        await closeEvaluationReport();
+                        await sleep(waitSec * 1000);
+                        continue;
+                    }
+                    log(`第 ${roundNo} 轮测评未完成（${reason}），终止循环`, 'warn');
                     break;
                 }
+                softFailures = 0;
 
                 const mastery = round.mastery;
                 if (!loopCfg.active) {
@@ -2239,44 +2386,68 @@
                     break;
                 }
 
-                if (mastery == null) {
-                    log('未能读取本次测评熟练度数值，为避免无限重复已终止循环', 'warn');
-                    await closeEvaluationReport();
-                    break;
-                }
-                log(`第 ${roundNo} 轮测评熟练度：${mastery}%（目标 ${loopCfg.target.value}%）`, 'info');
-
-                if (!shouldContinueEvalLoop(true, loopCfg.target.value, mastery)) {
-                    log(`熟练度已达目标（${mastery}% ≥ ${loopCfg.target.value}%），循环测试结束`, 'success');
-                    await closeEvaluationReport();
-                    break;
+                if (loopCfg.infinite) {
+                    log(mastery == null
+                        ? `第 ${roundNo} 轮测评已完成（未能读取熟练度数值，继续下一轮）`
+                        : `第 ${roundNo} 轮测评熟练度：${mastery}%（无限循环模式，忽略目标值）`, 'info');
+                } else {
+                    if (mastery == null) {
+                        log('未能读取本次测评熟练度数值，为避免无限重复已终止循环', 'warn');
+                        await closeEvaluationReport();
+                        break;
+                    }
+                    log(`第 ${roundNo} 轮测评熟练度：${mastery}%（目标 ${loopCfg.target.value}%）`, 'info');
+                    if (!shouldContinueEvalLoop(true, loopCfg.target.value, mastery)) {
+                        log(`熟练度已达目标（${mastery}% ≥ ${loopCfg.target.value}%），循环测试结束`, 'success');
+                        await closeEvaluationReport();
+                        break;
+                    }
                 }
                 if (evalStopRequested()) {
                     log('已手动停止测评，终止循环', 'warn');
                     break;
                 }
                 if (roundNo >= maxRounds) {
-                    log(`已连续测评 ${maxRounds} 轮仍未达到目标，为避免过度请求已终止循环`, 'warn');
+                    log(loopCfg.infinite
+                        ? `已连续测评 ${maxRounds} 轮，达到安全上限，已终止循环`
+                        : `已连续测评 ${maxRounds} 轮仍未达到目标，为避免过度请求已终止循环`, 'warn');
                     await closeEvaluationReport();
                     break;
                 }
 
-                log(`本次熟练度 ${mastery}% 低于目标 ${loopCfg.target.value}%，将自动开始第 ${roundNo + 1} 轮完整测评（学习目标校验 → 开始测评 → 自动答题 → 查看报告）`, 'info');
-                const againBtn = findReportButton(/^再测一次$/);
+                log(loopCfg.infinite
+                    ? `准备开始第 ${roundNo + 1} 轮完整测评（学习目标校验 → 开始测评 → 自动答题 → 查看报告）`
+                    : `本次熟练度 ${mastery}% 低于目标 ${loopCfg.target.value}%，将自动开始第 ${roundNo + 1} 轮完整测评（学习目标校验 → 开始测评 → 自动答题 → 查看报告）`, 'info');
+
+                // 「再测一次」按钮可能因报告渲染延迟而暂时找不到，这里多等几秒
+                let againBtn = findReportButton(/^再测一次$/);
+                for (let i = 0; i < 10 && !againBtn; i++) {
+                    await sleep(600);
+                    againBtn = findReportButton(/^再测一次$/);
+                }
                 if (!againBtn) {
-                    log('未找到【再测一次】按钮，无法继续循环，已终止', 'warn');
+                    // 兜底：关闭报告后回到课程首页，由下一轮重新从测评入口启动，不再直接终止循环
+                    log('未找到【再测一次】按钮，关闭报告后从测评入口重新开始下一轮', 'warn');
                     await closeEvaluationReport();
-                    break;
+                    await sleep(1500);
+                    continue;
                 }
                 fireHumanClick(againBtn);
                 // 等待平台从报告页切回测评封面，再进入下一轮完整流程
-                for (let i = 0; i < 20; i++) {
-                    await sleep(500);
-                    if (!isEvaluationReportVisible()) break;
+                let backToCover = false;
+                for (let i = 0; i < 30; i++) {
+                    await sleep(600);
+                    if (!isEvaluationReportVisible()) { backToCover = true; break; }
                 }
-                await sleep(800);
+                if (!backToCover) log('点击【再测一次】后测评报告未关闭，稍后继续尝试下一轮', 'warn');
+                // 轮次之间留出随机冷却，降低连续测评被平台判定为高频的概率
+                await sleep(loopCfg.infinite
+                    ? 4000 + Math.floor(Math.random() * 3000)
+                    : 900 + Math.floor(Math.random() * 700));
             }
         } finally {
+            // 无论正常结束、异常、手动停止还是轮次上限，都清扫测评残留弹窗，避免卡住主循环
+            await cleanupEvaluationUi(state.evalStopRequested ? '测评已手动停止' : '测评流程结束');
             state.config.running = prevRunning;
             state.evaluationRunning = false;
             state.evalStopRequested = false;
@@ -2330,14 +2501,17 @@
 
         // 封面：点击「开始测评」并等待题目/报告。
         // 平台在学习目标未变化时可能对旧题池返回「暂无可测评题目」，此时按手动可行路径
-        // 强制重走「更改 → 全选 → 确定」刷新题池后重试（最多 2 次）；其余拦截提示仍直接终止。
+        // 强制重走「更改 → 取消全选 → 重新全选 → 确定」刷新题池后重试（最多 3 次）；其余拦截提示仍直接终止。
         let ready = false;
-        for (let attempt = 0; attempt < 2 && !ready; attempt++) {
+        for (let attempt = 0; attempt < 3 && !ready; attempt++) {
             if (evaluationAnsweringEl() || isEvaluationReportVisible()) { ready = true; break; }
             if (evalStopRequested()) return { status: 'aborted', reason: 'manual-stop' };
             if (attempt > 0) {
-                await prepareEvaluationScope(evaluationDialogEl(), true);
-                await sleep(600);
+                // 上次失败后平台可能仍在收尾，先等一会再改学习目标
+                await sleep(2000 + Math.floor(Math.random() * 1500));
+                const scopeOk = await prepareEvaluationScope(evaluationDialogEl(), true);
+                if (!scopeOk) log('重新选择学习目标未完成，仍尝试继续【开始测评】', 'warn');
+                await sleep(1200);
             }
 
             let startBtn = null, noTopic = false;
@@ -2379,8 +2553,8 @@
                 }
             }
             if (noTopic) {
-                log(attempt === 0
-                    ? '平台提示【暂无可测评题目】，将重新选择学习目标刷新题池后重试'
+                log(attempt < 2
+                    ? `平台提示【暂无可测评题目】，将重新选择学习目标刷新题池后重试（第 ${attempt + 1}/3 次）`
                     : '重新选择学习目标后仍【暂无可测评题目】', 'warn');
                 continue;
             }
@@ -2397,10 +2571,16 @@
         if (!result || !result.completed) {
             return { status: 'aborted', reason: evalStopRequested() ? 'manual-stop' : 'incomplete', result };
         }
+        // 报告可能比答题流程稍晚渲染，先等报告出现再读取熟练度
+        for (let i = 0; i < 20 && !isEvaluationReportVisible(); i++) await sleep(500);
         const box = Array.from(document.querySelectorAll('.ReportBox')).find(isVisibleEl);
         const summary = box ? String(box.innerText || '').replace(/\s+/g, ' ').slice(0, 180) : '';
         if (summary) log(`测评报告：${summary}`, 'success');
-        const mastery = extractEvaluationMastery();
+        let mastery = extractEvaluationMastery();
+        for (let i = 0; i < 8 && mastery == null; i++) {
+            await sleep(700);
+            mastery = extractEvaluationMastery();
+        }
         return { status: 'completed', mastery, summary, result };
     }
 
@@ -2676,6 +2856,39 @@
         return null;
     }
 
+    // 通用可点击入口查找：兼容 button / div / span / a 等非 button 元素
+    // 平台部分练习入口（如「提升掌握度」）是 div/span 卡片，只按 button 查找会漏掉
+    function findClickableByText(pattern) {
+        const roots = [];
+        const lib = document.querySelector('.SubjectLib');
+        if (lib) roots.push(lib);
+        roots.push(document);
+        const sel = 'button, .el-button, a, div, span, li';
+        for (const root of roots) {
+            const els = Array.from(root.querySelectorAll(sel));
+            const hits = els.filter(el => {
+                if (!isVisibleEl(el) || el.disabled || el.classList.contains('is-disabled')) return false;
+                const text = String(el.innerText || '').replace(/\s+/g, '');
+                if (!text || text.length > 20) return false;
+                if (!pattern.test(text)) return false;
+                // 只取最内层命中元素，避免点到外层包裹容器
+                return !Array.from(el.children).some(c => pattern.test(String(c.innerText || '').replace(/\s+/g, '')));
+            });
+            if (hits.length) {
+                hits.sort((a, b) => {
+                    const rank = (el) => el.tagName === 'BUTTON' ? 0 :
+                        /btn|button/i.test(String(el.className || '')) ? 1 :
+                        el.tagName === 'A' ? 2 : 3;
+                    return rank(a) - rank(b);
+                });
+                const el = hits[0];
+                // 命中的是按钮内部节点时，点击动作交给外层按钮
+                return el.closest('button, .el-button, a') || el;
+            }
+        }
+        return null;
+    }
+
     /**
      * 处理自适应练习课件
      */
@@ -2711,11 +2924,12 @@
             }
         }
 
-        // 2. 否则查找开始 / 继续 / 重新练题入口
+        // 2. 否则查找开始 / 继续 / 重新练题入口（含 div/span 形式的「提升掌握度」卡片）
         if (!entered) {
-            const startBtn = findExerciseStartButton();
+            const startBtn = findExerciseStartButton() ||
+                findClickableByText(/^(提升掌握度|提升熟练度|开始练习|继续练习|重新练[习题]|再练一次|开始答题|继续答题|去练习)$/);
             if (startBtn) {
-                const label = (startBtn.innerText || '').trim();
+                const label = (startBtn.innerText || '').trim() || '练习入口';
                 fireHumanClick(startBtn);
                 log(`已点击【${label}】，等待题目加载...`, 'info');
                 await sleep(2500);
@@ -2725,25 +2939,27 @@
         // 处理可能弹出的“仍要学习/重新练习”确认框
         await handleModals();
 
-        // 3. 等待题目界面出现（纯 DOM 判定：题目 / 报告）；封面按钮出现时再点一次触发练习
+        // 3. 等待题目界面出现（纯 DOM 判定：题目 / 报告）；入口仍在时继续点击，
+        //    兼容「提升掌握度 → 开始练习」这类需要点两层的入口
         let qdom = null;
-        let retriedStart = false;
-        for (let i = 0; i < 30; i++) {
+        let startClickCount = 0;
+        for (let i = 0; i < 40; i++) {
             qdom = readPracticeQuestionDom();
-            if (qdom && !qdom.over) break;
-            if (!retriedStart && i >= 2) {
+            if (qdom) break;
+            if (i >= 2 && startClickCount < 4) {
                 const coverBtn = findPracticeButton(/提升掌握度|提升熟练度|开始练习|继续练习|重新练[习题]|再练一次/) ||
-                    findExerciseStartButton();
+                    findExerciseStartButton() ||
+                    findClickableByText(/^(提升掌握度|提升熟练度|开始练习|继续练习|重新练[习题]|再练一次|去练习)$/);
                 if (coverBtn) {
-                    retriedStart = true;
-                    const label = (coverBtn.innerText || '').trim();
+                    startClickCount++;
+                    const label = (coverBtn.innerText || '').trim() || '练习入口';
                     fireHumanClick(coverBtn);
                     log(`已点击【${label}】，等待题目加载...`, 'info');
-                    await sleep(1500);
+                    await sleep(2000);
                     continue;
                 }
             }
-            if (i === 5 || i === 15) log('练习界面加载中… ' + describePracticeDom(), 'warn');
+            if (i === 5 || i === 15 || i === 25) log('练习界面加载中… ' + describePracticeDom(), 'warn');
             await sleep(1000);
         }
 
@@ -2761,7 +2977,8 @@
                 log(`练习处于报告页（第 ${attempt + 1} 次尝试），点击【重新练题/提升掌握度】...`, 'warn');
                 const redoBtn = findPracticeButton(/重新练[习题]|再练一次|再次练习|提升掌握度|提升熟练度/) ||
                     findActionButton(/^(重新练[习题]|再练一次|再次练习|提升掌握度|提升熟练度)/) ||
-                    findExerciseStartButton();
+                    findExerciseStartButton() ||
+                    findClickableByText(/^(重新练[习题]|再练一次|再次练习|提升掌握度|提升熟练度)$/);
                 if (!redoBtn) break;
                 fireHumanClick(redoBtn);
                 await sleep(2500);
@@ -2937,7 +3154,7 @@
             position: fixed;
             right: 20px;
             bottom: 24px;
-            width: 372px;
+            width: min(460px, calc(100vw - 32px));
             background: #1e293b;
             color: #f8fafc;
             border-radius: 12px;
@@ -2998,6 +3215,29 @@
             gap: 10px;
             max-height: calc(100vh - 150px);
             overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #475569 #1e293b;
+        }
+        .fif-body::-webkit-scrollbar,
+        .fif-log-list::-webkit-scrollbar {
+            width: 10px;
+        }
+        .fif-body::-webkit-scrollbar-track,
+        .fif-log-list::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.6);
+            border-radius: 6px;
+        }
+        .fif-body::-webkit-scrollbar-thumb,
+        .fif-log-list::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 6px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+        .fif-body::-webkit-scrollbar-thumb:hover,
+        .fif-log-list::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+            background-clip: padding-box;
         }
         .fif-status-box {
             background: #0f172a;
@@ -3169,6 +3409,17 @@
             color: #fca5a5;
             word-break: break-all;
         }
+        .fif-eval-opts {
+            margin-top: 4px;
+            font-size: 11px;
+            color: #fca5a5;
+        }
+        .fif-eval-opts label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+        }
         .fif-eval-hint {
             font-size: 11px;
             line-height: 1.45;
@@ -3185,18 +3436,35 @@
             box-shadow: 0 0 0 1px rgba(248, 113, 113, .35);
         }
         .fif-log-list {
+            width: 100%;
+            box-sizing: border-box;
             background: #0f172a;
             border: 1px solid #334155;
             border-radius: 6px;
-            height: 92px;
+            height: clamp(240px, 40vh, 420px);
+            min-height: 140px;
+            resize: vertical;
             overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #475569 #0f172a;
             padding: 6px 8px;
             font-family: Consolas, Monaco, monospace;
-            font-size: 11px;
+            font-size: 11.5px;
+            line-height: 1.5;
             color: #94a3b8;
             display: flex;
             flex-direction: column;
             gap: 3px;
+        }
+        .fif-log-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 4px;
+            word-break: break-word;
+        }
+        .fif-log-item > span {
+            flex: 0 0 auto;
+            color: #64748b;
         }
         .fif-log-item.success { color: #34d399; }
         .fif-log-item.warn { color: #fbbf24; }
@@ -3304,6 +3572,9 @@
                         <label title="开启后：本次测评熟练度低于目标值时自动开始新一轮完整测评；达到目标、手动停止或出现异常时立即终止"><input type="checkbox" id="fif-cfg-eval-loop" ${state.config.evalLoop ? 'checked' : ''}> 循环测试</label>
                     </div>
                     <input type="text" id="fif-cfg-eval-target" inputmode="numeric" placeholder="目标熟练度指标（选填，0-100 整数）" autocomplete="off">
+                    <div class="fif-eval-opts">
+                        <label title="高风险：忽略目标熟练度，每轮测评结束后自动开始下一轮，直到手动点击「停止测评」；遇到平台拦截（测评间隔过短/已掌握）或连续失败会自动终止"><input type="checkbox" id="fif-cfg-eval-infinite" ${state.config.evalInfinite ? 'checked' : ''}> 无限循环刷熟练度</label>
+                    </div>
                     <div class="fif-eval-hint" id="fif-eval-target-hint"></div>
                 </div>
                 <div class="fif-btn-row">
@@ -3464,6 +3735,16 @@
             updateEvalTargetHint();
         });
 
+        const evalInfiniteInput = document.getElementById('fif-cfg-eval-infinite');
+        if (evalInfiniteInput) evalInfiniteInput.addEventListener('change', (e) => {
+            state.config.evalInfinite = e.target.checked;
+            saveConfig();
+            updateEvalTargetHint();
+            log(state.config.evalInfinite
+                ? '【高风险】无限循环已开启：忽略目标熟练度，每轮结束自动开始下一轮，直到手动点击「停止测评」'
+                : '无限循环已关闭', state.config.evalInfinite ? 'warn' : 'info');
+        });
+
         document.getElementById('fif-run-eval').addEventListener('click', async (e) => {
             const btn = e.currentTarget;
             if (state.evaluationRunning) {
@@ -3527,7 +3808,7 @@
             else badgeEl.textContent = state.config.running ? '运行中' : '待机';
         }
         if (logBox) {
-            logBox.innerHTML = state.logs.slice(0, 25).map(item =>
+            logBox.innerHTML = state.logs.slice(0, 60).map(item =>
                 `<div class="fif-log-item ${item.level}"><span>${item.time}</span> ${item.msg}</div>`
             ).join('');
         }
@@ -3547,14 +3828,17 @@
         if (!hint) return;
         const raw = input ? input.value : state.config.evalTargetMastery;
         const parsed = parseEvalTargetInput(raw);
-        if (!parsed.valid) {
-            hint.textContent = '⚠ ' + parsed.message;
-            hint.classList.add('fif-invalid');
-            if (input) input.classList.add('fif-input-invalid');
+        if (input) input.classList.toggle('fif-input-invalid', !parsed.valid);
+        hint.classList.toggle('fif-invalid', !parsed.valid);
+        if (state.config.evalInfinite) {
+            hint.textContent = '无限循环已开启：忽略目标熟练度，持续测评直到手动点击「停止测评」'
+                + (parsed.valid ? '' : '（当前目标值无效，但无限循环模式下不使用该值）');
             return;
         }
-        hint.classList.remove('fif-invalid');
-        if (input) input.classList.remove('fif-input-invalid');
+        if (!parsed.valid) {
+            hint.textContent = '⚠ ' + parsed.message;
+            return;
+        }
         if (!parsed.provided) {
             hint.textContent = '选填：0-100 的整数；不填则只进行单轮测评';
         } else if (state.config.evalLoop) {
