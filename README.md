@@ -54,11 +54,9 @@
 
 ### 方法 A：从 GitHub 安装（推荐）
 
-1. 点击打开 [油猴脚本安装地址](https://raw.githubusercontent.com/XiaoMaxer/course-learning-toolkit/main/course-learning-toolkit.user.js)，或在本仓库打开 [`course-learning-toolkit.user.js`](./course-learning-toolkit.user.js) 后点击 **Raw**。
-2. Tampermonkey 会自动弹出用户脚本安装页。
+1. 在本仓库打开 [`course-learning-toolkit.user.js`](./course-learning-toolkit.user.js) 文件页面，点击右上角 **⬇️ Download** 按钮下载脚本到本地。
+2. 也可以直接打开 [油猴脚本安装地址](https://raw.githubusercontent.com/XiaoMaxer/course-learning-toolkit/main/course-learning-toolkit.user.js)，Tampermonkey 会自动弹出用户脚本安装页。
 3. 核对脚本名称、版本和匹配网站后，点击 **安装**。
-
-也可以直接复制 Raw 页面的完整网址，在 Edge 地址栏中打开。
 
 ### 方法 B：本地文件安装
 
@@ -135,8 +133,8 @@ API Key 保存在当前浏览器的油猴脚本存储及本地存储中，不会
 
 ## 六、更新脚本
 
-1. 打开新版 `.user.js` 的 Raw 地址。
-2. 在 Tampermonkey 页面点击 **更新**。
+1. 在仓库页面打开新版 `.user.js` 文件，点击右上角 **⬇️ Download** 下载。
+2. 在 Tampermonkey 管理页点击 **更新**（或重新安装下载的新版本）。
 3. 更新后刷新 FIF 平台页面。
 
 维护者修改脚本时应递增头部 `@version`，否则 Tampermonkey 可能把重新安装识别为同版本覆盖。
