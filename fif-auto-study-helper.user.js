@@ -3,10 +3,10 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/fif-auto-study-helper
-// @version      1.4.4
-// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、自动跳过单元检测及防死循环保护。
-// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、自动跳过单元检测及防死循环保护。
-// @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, and AI-powered adaptive practice auto-completion.
+// @version      1.5.0
+// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护。
+// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护。
+// @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
 // @author       Antigravity
 // @match        https://icourse.fifedu.com/*
 // @match        https://resc.fifedu.com/iplat-resc/pdfv-resource/web/viewer.html*
@@ -188,6 +188,7 @@
         processedInVisit: new Set(),
         lastIndexUrl: Storage.get('lastIndexUrl', ''),
         busy: false,
+        evaluationRunning: false,
         stuckCounter: 0,
         statusText: '就绪，点击「开始刷课」启动自动化',
         logs: []
@@ -1494,16 +1495,15 @@
         }
     }
 
-    // 读取当前页面上的练习题（纯 DOM，不依赖 Vue 实例）
-    function readPracticeQuestionDom() {
-        let lib = null;
-        try { lib = document.querySelector('.SubjectLib'); } catch (e) { lib = null; }
-        if (!lib) return null;
-        const reportEl = lib.querySelector('.Report');
-        if (reportEl && isVisibleEl(reportEl)) return { over: true, lib };
+    // 读取指定容器内的练习题（纯 DOM，不依赖 Vue 实例）
+    // 自适应练习的根节点是 .SubjectLib；测评弹窗的根节点是 .dialogBox
+    function readQuestionDomFrom(root) {
+        if (!root) return null;
+        const reportEl = root.querySelector('.Report');
+        if (reportEl && isVisibleEl(reportEl)) return { over: true, lib: root };
 
         let blocks = [];
-        try { blocks = Array.from(lib.querySelectorAll('.SubjectCon .RCJTmp')); } catch (e) { blocks = []; }
+        try { blocks = Array.from(root.querySelectorAll('.SubjectCon .RCJTmp')); } catch (e) { blocks = []; }
         if (blocks.length > 1) {
             // 只保留最外层题目容器，避免重复
             blocks = blocks.filter(b => !blocks.some(o => o !== b && b.contains(o)));
@@ -1520,7 +1520,14 @@
         }).filter(it => it.options.length >= 2);
 
         if (!items.length) return null;
-        return { over: false, lib, items };
+        return { over: false, lib: root, items };
+    }
+
+    function readPracticeQuestionDom() {
+        let lib = null;
+        try { lib = document.querySelector('.SubjectLib'); } catch (e) { lib = null; }
+        if (!lib) return null;
+        return readQuestionDomFrom(lib);
     }
 
     function practiceQuestionSignature(q) {
@@ -1720,6 +1727,314 @@
         const over = !!(document.querySelector('.SubjectLib .Report'));
         if (over) log(`本节练习作答完成：提交 ${answered} 题，正确 ${correct}，错误 ${wrong}`, 'success');
         return { answered, correct, wrong, completed: over };
+    }
+
+    // =========================================================================
+    // 7.2 课程「测评评估掌握度」自动答题
+    // 入口：课程首页掌握度卡片 .knowledge-mastery-desc .inner_text
+    // 弹窗：HappyDrink 封面 -> .dialogBox 答题 -> .ReportBox 报告
+    // =========================================================================
+    function findEvaluationTrigger() {
+        return Array.from(document.querySelectorAll('.knowledge-mastery-desc .inner_text, .knowledge-mastery-desc span'))
+            .find(el => isVisibleEl(el) && /^测评评估掌握度$/.test(String(el.innerText || '').trim())) || null;
+    }
+
+    function evaluationDialogEl() {
+        const dlg = Array.from(document.querySelectorAll('.CEDialog')).find(isVisibleEl);
+        if (dlg) return dlg;
+        // 兼容自定义 class 未落到 .el-dialog 的情况：封面 .HappyDrink 出现即视为弹窗已打开
+        return Array.from(document.querySelectorAll('.HappyDrink')).find(isVisibleEl) || null;
+    }
+
+    function evaluationAnsweringEl() {
+        return Array.from(document.querySelectorAll('.dialogBox')).find(isVisibleEl) || null;
+    }
+
+    function evaluationMessageText() {
+        const els = Array.from(document.querySelectorAll('.el-message-box__message, .el-message'));
+        for (const el of els) {
+            if (!isVisibleEl(el)) continue;
+            const text = String(el.innerText || '').replace(/\s+/g, ' ').trim();
+            if (text) return text;
+        }
+        return '';
+    }
+
+    function isEvaluationBlockedMessage(msg) {
+        return /时间过短|暂无可测评|已经掌握|最短时间间隔/.test(String(msg || ''));
+    }
+
+    function closeEvaluationMessageBox() {
+        const btn = Array.from(document.querySelectorAll('.el-message-box__btns button, .el-message-box__headerbtn'))
+            .find(isVisibleEl);
+        if (btn) { fireHumanClick(btn); return true; }
+        return false;
+    }
+
+    function findEvaluationButton(pattern, root) {
+        const scope = root || Array.from(document.querySelectorAll('.dialogBox')).find(isVisibleEl);
+        if (!scope) return null;
+        return Array.from(scope.querySelectorAll('button, .el-button')).find(btn => {
+            if (!isVisibleEl(btn) || btn.disabled || btn.classList.contains('is-disabled')) return false;
+            return pattern.test(String(btn.innerText || '').replace(/\s+/g, ''));
+        }) || null;
+    }
+
+    function readEvaluationQuestionDom() {
+        const boxes = Array.from(document.querySelectorAll('.dialogBox')).filter(isVisibleEl);
+        for (const box of boxes) {
+            const q = readQuestionDomFrom(box);
+            if (q) return q;
+        }
+        return null;
+    }
+
+    function isEvaluationReportVisible() {
+        return Array.from(document.querySelectorAll('.ReportBox'))
+            .some(box => isVisibleEl(box) && !!box.querySelector('.Report'));
+    }
+
+    function findReportButton(pattern) {
+        const boxes = Array.from(document.querySelectorAll('.ReportBox')).filter(isVisibleEl);
+        for (const box of boxes) {
+            const btn = Array.from(box.querySelectorAll('button, .el-button')).find(b =>
+                isVisibleEl(b) && !b.disabled && pattern.test(String(b.innerText || '').trim()));
+            if (btn) return btn;
+        }
+        return null;
+    }
+
+    async function autoAnswerEvaluationDom() {
+        if (!acquireAiLock()) {
+            log('检测到另一个标签页正在答题，已跳过测评，避免重复提交', 'warn');
+            return { answered: 0, correct: 0, wrong: 0, completed: false };
+        }
+        const minDelay = clampNumber(state.config.aiMinDelayMs, 500, 30000, 2500);
+        const maxDelay = Math.max(minDelay, clampNumber(state.config.aiMaxDelayMs, 500, 60000, 6000));
+        const maxQuestions = clampNumber(state.config.aiMaxQuestions, 1, 200, 50);
+        const doneSigs = new Set();
+        let answered = 0, correct = 0, wrong = 0, idle = 0, stuckSig = '', stuckCount = 0;
+
+        try {
+            while (state.config.running && answered < maxQuestions) {
+                if (aiLockHeldByOther()) {
+                    log('另一个标签页已接管答题，本页退出以防重复提交', 'warn');
+                    break;
+                }
+                touchAiLock();
+
+                if (isEvaluationReportVisible()) break;
+
+                const reportBtn = findEvaluationButton(/^显示报告$/);
+                if (reportBtn) {
+                    fireHumanClick(reportBtn);
+                    log('测评已全部作答，点击【显示报告】', 'info');
+                    await sleep(2500);
+                    continue;
+                }
+
+                const q = readEvaluationQuestionDom();
+                if (!q || q.over) {
+                    idle++;
+                    if (idle > 40) {
+                        log('等待测评题目超时，结束本次测评作答', 'warn');
+                        break;
+                    }
+                    await sleep(900);
+                    continue;
+                }
+                idle = 0;
+
+                const sig = practiceQuestionSignature(q);
+                if (sig === stuckSig) stuckCount++; else { stuckSig = sig; stuckCount = 0; }
+                if (stuckCount > 100) {
+                    log('测评题目长时间未变化，已停止本次作答', 'error');
+                    break;
+                }
+
+                if (doneSigs.has(sig)) {
+                    const nextBtn = findEvaluationButton(/^下一题$/);
+                    if (nextBtn) {
+                        fireHumanClick(nextBtn);
+                        log('已点击【下一题】', 'info');
+                        await sleep(1200);
+                    } else {
+                        await sleep(1200);
+                    }
+                    continue;
+                }
+
+                // 稍等平台 next 响应写入答案簿，避免题面先渲染、答案后到达的竞态
+                await sleep(700);
+                const answers = await resolveAnswersForDom(q.items);
+                if (answers.some(a => !a || !a.length)) {
+                    log('未能取得本题可靠答案，已暂停测评作答（平台未返回标准答案且 AI 兜底不可用）', 'warn');
+                    break;
+                }
+
+                let clicked = 0;
+                q.items.forEach((item, qi) => {
+                    answers[qi].forEach(idx => {
+                        const opt = item.options[idx];
+                        if (opt && fireHumanClick(opt.el)) clicked++;
+                    });
+                });
+                const preview = answers.map(a => a.map(i => String.fromCharCode(65 + i)).join('')).join(' / ');
+                log(`测评已选择答案 ${preview}（点击 ${clicked} 个选项），即将提交…`, 'info');
+
+                const thinkMs = minDelay + Math.floor(Math.random() * (maxDelay - minDelay + 1));
+                await sleep(thinkMs);
+                if (!state.config.running) break;
+
+                const submitBtn = findEvaluationButton(/^选完了$/);
+                if (!submitBtn) {
+                    log('未找到【选完了】提交按钮，结束本次测评作答', 'warn');
+                    break;
+                }
+                lastCheckResult = null;
+                fireHumanClick(submitBtn);
+                doneSigs.add(sig);
+                answered++;
+                log(`测评第 ${answered} 题已提交，等待判题…`, 'info');
+
+                for (let i = 0; i < 24 && state.config.running; i++) {
+                    await sleep(600);
+                    if (isEvaluationReportVisible()) break;
+                    if (findEvaluationButton(/^下一题$/) || findEvaluationButton(/^显示报告$/)) break;
+                    const now = readEvaluationQuestionDom();
+                    if (now && !now.over && practiceQuestionSignature(now) !== sig) break;
+                }
+
+                const chk = lastCheckResult;
+                const d = (chk && chk.data) ? chk.data : chk;
+                const nextBtn = findEvaluationButton(/^下一题$/);
+                const right = d
+                    ? !!(d.status === 1 || d.isCorrect === 1 || d.isCorrect === true ||
+                        d.correct === 1 || d.correct === true)
+                    : !nextBtn;
+                if (right) correct++; else wrong++;
+
+                // 答错时平台会停留在本题并给出「下一题」
+                if (nextBtn) {
+                    fireHumanClick(nextBtn);
+                    log('已点击【下一题】', 'info');
+                    await sleep(1200);
+                }
+            }
+        } finally {
+            releaseAiLock();
+        }
+
+        const completed = isEvaluationReportVisible();
+        if (completed) log(`测评作答完成：提交 ${answered} 题，正确 ${correct}，错误 ${wrong}`, 'success');
+        return { answered, correct, wrong, completed };
+    }
+
+    async function runCourseEvaluation() {
+        if (state.evaluationRunning) return;
+        let trigger = findEvaluationTrigger();
+        for (let i = 0; i < 16 && !trigger; i++) {
+            await sleep(500);
+            trigger = findEvaluationTrigger();
+        }
+        if (!trigger) {
+            log('未找到【测评评估掌握度】入口：请先进入课程首页，并等掌握度卡片加载完成', 'warn');
+            return;
+        }
+        if (evaluationDialogEl() || evaluationAnsweringEl()) {
+            log('测评弹窗已经打开，直接开始自动答题', 'info');
+        }
+
+        state.evaluationRunning = true;
+        const prevRunning = state.config.running;
+        state.config.running = true;
+        updatePanelUI();
+
+        try {
+            if (!evaluationDialogEl() && !evaluationAnsweringEl()) {
+                log('正在打开【测评评估掌握度】...', 'info');
+                fireHumanClick(trigger);
+
+                let dialog = null;
+                for (let i = 0; i < 40; i++) {
+                    dialog = evaluationDialogEl();
+                    if (dialog) break;
+                    const msg = evaluationMessageText();
+                    if (isEvaluationBlockedMessage(msg)) {
+                        log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                        closeEvaluationMessageBox();
+                        return;
+                    }
+                    await sleep(500);
+                }
+                if (!dialog) {
+                    log('测评弹窗未打开（可能距离上次测评时间过短或暂无可测评题目）', 'warn');
+                    return;
+                }
+            }
+
+            // 封面：点击「开始测评」
+            if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
+                let startBtn = null;
+                for (let i = 0; i < 25; i++) {
+                    const dialog = evaluationDialogEl();
+                    startBtn = dialog && findEvaluationButton(/^开始测评$/, dialog);
+                    if (startBtn) break;
+                    const msg = evaluationMessageText();
+                    if (isEvaluationBlockedMessage(msg)) {
+                        log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                        closeEvaluationMessageBox();
+                        return;
+                    }
+                    await sleep(400);
+                }
+                if (!startBtn) {
+                    log('未找到【开始测评】按钮，已停止本次测评', 'warn');
+                    return;
+                }
+                await sleep(600 + Math.floor(Math.random() * 900));
+                fireHumanClick(startBtn);
+                log('已点击【开始测评】，等待题目加载…', 'info');
+            }
+
+            // 等待答题界面或报告出现
+            let ready = false;
+            for (let i = 0; i < 50; i++) {
+                if (isEvaluationReportVisible()) { ready = true; break; }
+                const q = readEvaluationQuestionDom();
+                if ((q && q.items && q.items.length) || findEvaluationButton(/^显示报告$/)) { ready = true; break; }
+                const msg = evaluationMessageText();
+                if (isEvaluationBlockedMessage(msg)) {
+                    log(`平台提示：${msg.slice(0, 160)}`, 'warn');
+                    closeEvaluationMessageBox();
+                    return;
+                }
+                await sleep(700);
+            }
+            if (!ready) {
+                log('测评题目界面未加载：' + describePracticeDom(), 'warn');
+                return;
+            }
+
+            const result = await autoAnswerEvaluationDom();
+            if (result && result.completed) {
+                const box = Array.from(document.querySelectorAll('.ReportBox')).find(isVisibleEl);
+                const summary = box ? String(box.innerText || '').replace(/\s+/g, ' ').slice(0, 180) : '';
+                if (summary) log(`测评报告：${summary}`, 'success');
+                await sleep(1500);
+                const enterBtn = findReportButton(/^进入学习$/);
+                if (enterBtn) {
+                    fireHumanClick(enterBtn);
+                    log('已关闭测评报告，返回课程首页', 'info');
+                    await sleep(1200);
+                }
+            }
+        } finally {
+            state.config.running = prevRunning;
+            state.evaluationRunning = false;
+            saveConfig();
+            updatePanelUI();
+        }
     }
 
     function findActionButton(pattern) {
@@ -2569,6 +2884,9 @@
                     <button class="fif-btn fif-btn-secondary" id="fif-clear-skip" title="清空已标记跳过的异常小节缓存">清空跳过缓存 (<span id="fif-skip-count">${state.skipSections.size}</span>)</button>
                     <button class="fif-btn fif-btn-secondary" id="fif-go-home" title="返回学习空间课程列表首页">返回学习空间</button>
                 </div>
+                <div class="fif-btn-row">
+                    <button class="fif-btn fif-btn-secondary" id="fif-run-eval" title="在课程首页点击「测评评估掌握度」，自动完成测评答题">🎯 测评评估掌握度（自动答题）</button>
+                </div>
                 <div class="fif-log-list" id="fif-log-box"></div>
             </div>
         `;
@@ -2702,6 +3020,20 @@
             location.href = 'https://icourse.fifedu.com/istp-manage/work/home';
         });
 
+        document.getElementById('fif-run-eval').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            if (state.evaluationRunning) {
+                log('测评自动答题正在进行中…', 'warn');
+                return;
+            }
+            btn.disabled = true;
+            try {
+                await runCourseEvaluation();
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
         // 拖拽支持
         const handle = document.getElementById('fif-drag-handle');
         let isDragging = false, startX = 0, startY = 0, origRight = 20, origBottom = 24;
@@ -2751,6 +3083,8 @@
                 `<div class="fif-log-item ${item.level}"><span>${item.time}</span> ${item.msg}</div>`
             ).join('');
         }
+        const evalBtn = document.getElementById('fif-run-eval');
+        if (evalBtn) evalBtn.disabled = state.evaluationRunning;
     }
 
     // =========================================================================
@@ -2759,6 +3093,7 @@
     async function mainTick() {
         createPanel();
         if (!netTapState) startNetTap('always');
+        if (state.evaluationRunning) return;
         if (!window.__fifLibWatch) {
             window.__fifLibWatch = true;
             let lastLibHtml = '';
@@ -2818,6 +3153,9 @@
             saveSkipSections();
             saveCompletedCourses();
             updatePanelUI();
+        });
+        GM_registerMenuCommand('🎯 测评评估掌握度自动答题', () => {
+            runCourseEvaluation();
         });
     }
 
