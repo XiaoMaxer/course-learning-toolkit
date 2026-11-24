@@ -3,9 +3,9 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
-// @version      1.5.0
-// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护。
-// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护。
+// @version      1.6.0
+// @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题。
+// @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题。
 // @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
 // @author       Antigravity
 // @match        https://icourse.fifedu.com/*
@@ -1735,8 +1735,59 @@
     // 弹窗：HappyDrink 封面 -> .dialogBox 答题 -> .ReportBox 报告
     // =========================================================================
     function findEvaluationTrigger() {
+        const desc = document.querySelector('.knowledge-mastery-desc');
+        if (desc) {
+            // 优先命中平台渲染出的文字入口（含脚本补全的入口）
+            const textEntry = Array.from(desc.querySelectorAll('.inner_text, span')).find(el =>
+                isVisibleEl(el) && /测评评估掌握度/.test(String(el.innerText || '').trim()));
+            if (textEntry) return textEntry;
+            // 首次进入时平台可能因异步数据竞态没有渲染文字，外层 span 本身绑定了点击事件，可直接作为触发点
+            const clickable = Array.from(desc.children).find(el =>
+                el.tagName === 'SPAN' && getComputedStyle(el).display !== 'none');
+            if (clickable) return clickable;
+        }
         return Array.from(document.querySelectorAll('.knowledge-mastery-desc .inner_text, .knowledge-mastery-desc span'))
             .find(el => isVisibleEl(el) && /^测评评估掌握度$/.test(String(el.innerText || '').trim())) || null;
+    }
+
+    // 首次进入课程首页时，平台掌握度卡片依赖异步接口（checkIsReply / GetKnowledgePointCollect），
+    // 数据未就绪时「测评评估掌握度」入口不会渲染，且不会自动重试。这里做入口强制渲染校验与补全。
+    let evalEntryGuardStarted = false;
+    function ensureEvaluationEntry() {
+        const repair = () => {
+            const desc = document.querySelector('.knowledge-mastery-desc');
+            if (!desc) return;
+            const real = Array.from(desc.querySelectorAll('.inner_text:not([data-fif-inject])'))
+                .find(el => /测评评估掌握度/.test(String(el.innerText || '').trim()));
+            const mine = desc.querySelector('.inner_text[data-fif-inject]');
+            if (real) {
+                if (mine) mine.remove();
+                delete desc.dataset.fifEntryWait;
+                return;
+            }
+            if (mine) return;
+            if (!desc.dataset.fifEntryWait) {
+                desc.dataset.fifEntryWait = String(Date.now());
+                return;
+            }
+            if (Date.now() - Number(desc.dataset.fifEntryWait) < 1800) return;
+
+            const host = Array.from(desc.children).find(el => el.tagName === 'SPAN') || desc;
+            const span = document.createElement('span');
+            span.className = 'inner_text';
+            span.setAttribute('data-fif-inject', '1');
+            span.textContent = '测评评估掌握度';
+            span.style.cssText = 'display:inline-block;height:28px;line-height:28px;font-size:12px;color:#0a84ff;cursor:pointer;';
+            const scopeAttr = Array.from(desc.attributes).find(a => /^data-v-/.test(a.name));
+            if (scopeAttr) span.setAttribute(scopeAttr.name, scopeAttr.value);
+            host.appendChild(span);
+            log('【测评评估掌握度】入口未渲染，已自动补全（无需刷新页面）', 'success');
+        };
+        repair();
+        if (evalEntryGuardStarted) return;
+        evalEntryGuardStarted = true;
+        setInterval(repair, 900);
+        window.addEventListener('resize', repair);
     }
 
     function evaluationDialogEl() {
@@ -1802,6 +1853,90 @@
             if (btn) return btn;
         }
         return null;
+    }
+
+    // 测评前置校验与补全：首次测评时学习目标为空（覆盖显示「课程默认」），直接点「开始测评」会被平台拒绝
+    // （verifyPushTopic 返回 isNextQue=false → 暂无可测评题目）。这里自动完成「更改 → 全选 → 确定」。
+    async function prepareEvaluationScope(dialog) {
+        if (!dialog) return false;
+        const scopeText = () => String((dialog.querySelector('.learningTarget .num') || {}).innerText || '').replace(/\s+/g, '');
+        const hasScope = () => {
+            const t = scopeText();
+            return /\d+个/.test(t) && !/^0个/.test(t);
+        };
+        if (hasScope()) {
+            log(`测评覆盖范围已就绪：${scopeText()}`, 'info');
+            return true;
+        }
+        log(`测评覆盖范围为「${scopeText() || '课程默认'}」，正在自动选择学习目标…`, 'info');
+
+        const changeBtn = dialog.querySelector('.learningTarget .btn');
+        if (!changeBtn) {
+            log('未找到【更改】按钮，无法补全学习目标', 'warn');
+            return false;
+        }
+        fireHumanClick(changeBtn);
+
+        let setDlg = null;
+        const findSetDialog = () => Array.from(document.querySelectorAll('.set-target')).find(el => {
+            const box = el.querySelector('.set-box') || el;
+            return isVisibleEl(el) || isVisibleEl(box);
+        }) || null;
+        for (let i = 0; i < 25 && !setDlg; i++) {
+            setDlg = findSetDialog();
+            if (!setDlg) await sleep(400);
+        }
+        if (!setDlg) {
+            log('【设置学习目标】弹窗未打开，已中止本次测评', 'warn');
+            return false;
+        }
+        for (let i = 0; i < 30; i++) {
+            if (setDlg.querySelector('.el-tree-node')) break;
+            await sleep(400);
+        }
+
+        const selectAll = setDlg.querySelector('.set-left .set-content-title .link') ||
+            Array.from(setDlg.querySelectorAll('.set-left .link')).find(el => /全选/.test(String(el.innerText || '')));
+        if (!selectAll) {
+            log('未找到【全选】按钮，已中止本次测评', 'warn');
+            return false;
+        }
+        if (!/取消全选/.test(String(selectAll.innerText || ''))) fireHumanClick(selectAll);
+
+        let picked = 0;
+        for (let i = 0; i < 25; i++) {
+            const t = String((setDlg.querySelector('.set-right .set-content-title') || {}).innerText || '');
+            const m = t.match(/已选[：:]\s*(\d+)/);
+            picked = m ? parseInt(m[1], 10) : 0;
+            if (picked > 0) break;
+            await sleep(400);
+        }
+        if (!picked) {
+            log('全选后仍未选中任何知识点，已中止本次测评', 'warn');
+            return false;
+        }
+        log(`已勾选 ${picked} 个学习目标，正在保存…`, 'info');
+
+        const okBtn = setDlg.querySelector('.set-right .set-ensure') ||
+            Array.from(setDlg.querySelectorAll('.set-ensure')).find(el => /^确定$/.test(String(el.innerText || '').trim()));
+        if (!okBtn) {
+            log('未找到【确定】按钮，已中止本次测评', 'warn');
+            return false;
+        }
+        fireHumanClick(okBtn);
+
+        for (let i = 0; i < 40; i++) {
+            await sleep(500);
+            if (!findSetDialog()) break;
+        }
+        for (let i = 0; i < 30; i++) {
+            if (hasScope()) break;
+            await sleep(500);
+        }
+        const ok = hasScope();
+        log(ok ? `学习目标已保存，测评覆盖：${scopeText()}` : `学习目标保存后覆盖范围仍为「${scopeText() || '课程默认'}」`,
+            ok ? 'success' : 'warn');
+        return ok;
     }
 
     async function autoAnswerEvaluationDom() {
@@ -1932,6 +2067,15 @@
 
     async function runCourseEvaluation() {
         if (state.evaluationRunning) return;
+        ensureEvaluationEntry();
+        // 已配置 AI Key 时自动启用 AI 作答，保证测评启动后可自动完成全部题目
+        if (!state.config.aiEnabled && String(state.config.aiApiKey || '').trim()) {
+            state.config.aiEnabled = true;
+            log('检测到已配置 AI Key，已自动启用 AI 作答', 'info');
+        }
+        if (!String(state.config.aiApiKey || '').trim()) {
+            log('未配置 AI API Key：优先使用平台下发的标准答案，平台未下发答案的题目将暂停作答', 'warn');
+        }
         let trigger = findEvaluationTrigger();
         for (let i = 0; i < 16 && !trigger; i++) {
             await sleep(500);
@@ -1971,6 +2115,11 @@
                     log('测评弹窗未打开（可能距离上次测评时间过短或暂无可测评题目）', 'warn');
                     return;
                 }
+            }
+
+            // 封面：先做覆盖范围前置校验与补全（修复必须手动「更改→全选→确定」才能测评的问题）
+            if (!evaluationAnsweringEl() && !isEvaluationReportVisible()) {
+                await prepareEvaluationScope(evaluationDialogEl());
             }
 
             // 封面：点击「开始测评」
@@ -3092,6 +3241,7 @@
     // =========================================================================
     async function mainTick() {
         createPanel();
+        ensureEvaluationEntry();
         if (!netTapState) startNetTap('always');
         if (state.evaluationRunning) return;
         if (!window.__fifLibWatch) {
