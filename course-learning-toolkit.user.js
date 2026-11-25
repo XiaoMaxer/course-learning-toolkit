@@ -3,7 +3,7 @@
 // @name:zh-CN   FIF智慧教学平台全自动刷课助手 (icourse.fifedu.com)
 // @name:en      FIF Smart Teaching Platform Auto Study Helper
 // @namespace    https://github.com/XiaoMaxer/course-learning-toolkit
-// @version      1.8.4
+// @version      1.8.9
 // @description  适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止；新增「无限循环刷熟练度」，忽略目标持续测评直到手动停止。
 // @description:zh-CN 适用于 FIF 智慧教学平台 (icourse.fifedu.com) 全站课程自动学习：支持学习空间首页课程识别、全自动巡航章节、视频自动倍速/秒过（含损坏视频容错）、PPT自动翻页完成、Word/PDF文档自动置底完成、自适应练习 AI 自动答题并交卷、课程「测评评估掌握度」自动刷题、自动跳过单元检测及防死循环保护；修复首次进入测评入口不渲染、测评必须手动选择学习目标才能启动的问题；新增测评「循环测试」开关与目标熟练度指标（选填 0-100 整数，实时校验），未达目标自动再测一轮，达标/手动停止/异常即终止；新增「无限循环刷熟练度」，忽略目标持续测评直到手动停止。
 // @description:en Automated course study helper for FIF Smart Teaching Platform (icourse.fifedu.com). Supports dashboard course detection, video, PPT, PDF/Word, AI-powered adaptive practice and course evaluation auto-completion.
@@ -112,6 +112,20 @@
     // 仅在顶层窗口运行主控面板与状态机
     if ( window.top !== window.self ) return;
 
+    // 接收子框架（ow365 / PDF.js）通过 postMessage 上报的页码，用于真实翻页进度校验
+    const pptFrameState = { current: 0, total: 0, at: 0 };
+    try {
+        window.addEventListener('message', (ev) => {
+            const d = ev && ev.data;
+            if (!d || typeof d !== 'object') return;
+            const cur = Number(d.currentPageNum ?? d.data?.currentPageNum ?? d.currentPage);
+            const tot = Number(d.totalPageNum ?? d.data?.totalPageNum ?? d.totalPage);
+            if (Number.isFinite(cur) && cur > 0) pptFrameState.current = cur;
+            if (Number.isFinite(tot) && tot > 0) pptFrameState.total = tot;
+            if (Number.isFinite(cur) && cur > 0) pptFrameState.at = Date.now();
+        });
+    } catch (e) { /* ignore */ }
+
     // =========================================================================
     // 2. 存储与全局配置管理 (兼容无 GM_* 环境的降级存储)
     // =========================================================================
@@ -190,6 +204,9 @@
             evalInfinite: Storage.get('evalInfinite', DEFAULT_CONFIG.evalInfinite)
         },
         skipSections: new Set(Storage.get('skipSections', [])),
+        sessionSkipSections: new Set(),
+        sectionFailCount: new Map(),
+        skipReasonLogged: new Set(),
         completedCourses: new Set(Storage.get('completedCourses', [])),
         currentChapterKey: '',
         processedInVisit: new Set(),
@@ -209,6 +226,39 @@
 
     function saveSkipSections() {
         Storage.set('skipSections', Array.from(state.skipSections));
+    }
+
+    // 判断元素 class 中是否存在指定的状态类名，避免 [class*="isfinish"] 这类模糊匹配误判
+    function hasStatusClassToken(root, tokenRe) {
+        if (!root) return false;
+        return Array.from(root.querySelectorAll('[class]')).some(el => {
+            const cls = typeof el.className === 'string' ? el.className : '';
+            return cls.split(/\s+/).some(c => c && tokenRe.test(c));
+        });
+    }
+
+    // 同一小节连续失败 3 次才永久跳过；前 2 次仅本次运行跳过，重新加载页面后会再次尝试
+    function markSectionSkipped(name) {
+        if (!name) return;
+        const n = (state.sectionFailCount.get(name) || 0) + 1;
+        state.sectionFailCount.set(name, n);
+        if (n >= 3) {
+            state.skipSections.add(name);
+            saveSkipSections();
+            log(`小节【${name}】已连续 ${n} 次未能完成，加入永久跳过列表（可在面板「清空跳过缓存」恢复）`, 'warn');
+        } else {
+            state.sessionSkipSections.add(name);
+            log(`小节【${name}】本次运行暂时跳过（第 ${n}/3 次失败），重新加载页面后会再次尝试`, 'warn');
+        }
+    }
+
+    // 跳过原因只记录一次，避免每秒刷屏
+    function logSkipOnce(name, reason) {
+        const key = `${name}｜${reason}`;
+        if (state.skipReasonLogged.has(key)) return;
+        state.skipReasonLogged.add(key);
+        if (state.skipReasonLogged.size > 200) state.skipReasonLogged.clear();
+        log(`跳过小节【${name}】：${reason}`, 'info');
     }
 
     function saveCompletedCourses() {
@@ -396,9 +446,30 @@
             return MODAL_ACCEPT_WORDS.some(w => (w.length === 1 ? compact === w : (compact === w || compact.includes(w))));
         };
 
-        // 1) 「正在答题中，退出后为您暂时保留此次作答进度！」优先确认退出，否则流程会卡死
+        // 1) 「正在答题中，退出后为您暂时保留此次作答进度！」
+        //    按场景区分：
+        //    - 小节练习中且仍有未答题目：点「取消/继续答题」留在当前页，避免丢弃后面的题
+        //    - 测评中 / 无活动题目：点「退出/确定」退出，继续后续流程（原行为）
         const exitModal = modals.find(m => /正在答题中|暂时保留|作答进度/.test(modalTextOf(m)));
         if (exitModal) {
+            const inPractice = (() => {
+                if (state.evaluationRunning) return false;
+                if (document.querySelector('.CEDialog, .dialogBox, .HappyDrink')) return false;
+                try { const q = readPracticeQuestionDom(); return !!(q && !q.over); } catch (e) { return false; }
+            })();
+            if (inPractice) {
+                const stayed = clickModalButton(exitModal, (t) => {
+                    const c = String(t || '').replace(/\s+/g, '');
+                    if (!c) return false;
+                    return /取消|继续答题|继续作答|留在|暂不|再想想/.test(c);
+                });
+                if (stayed) {
+                    log(`检测到【正在答题中】弹窗，本节仍有题目，已点击【${stayed}】留在当前页继续作答`, 'warn');
+                    state.lastProgressAt = Date.now();
+                    await sleep(1200);
+                    return true;
+                }
+            }
             const clicked = clickModalButton(exitModal, (t) => {
                 const c = String(t || '').replace(/\s+/g, '');
                 if (!c || isRejectText(c)) return false;
@@ -608,14 +679,19 @@
             const m = resText.match(/(\d+)\s*个(资源|学习)活动/);
             const count = m ? parseInt(m[1], 10) : 0;
 
-            const hasCheck = !!row.querySelector('.icon-isfinished, [class*="isfinish"]');
-            const isLocked = !!row.querySelector('.icon-locked, .icon-becomedue, [class*="locked"]');
+            const hasCheck = !!row.querySelector('.icon-isfinished') ||
+                hasStatusClassToken(row, /^(icon-)?is-?finish(ed)?$/i) ||
+                /已完成|已学完/.test(resText);
+            const isLocked = !!row.querySelector('.icon-locked, .icon-becomedue') ||
+                hasStatusClassToken(row, /^(icon-)?(is-)?locked$|^(icon-)?becomedue$/i);
             const name = nameEl.innerText.split('\n')[0].trim();
             const isExam = isExamTitle(name);
 
-            if (isLeaf && count > 0 && !hasCheck && !isLocked) {
-                if (state.config.skipExams && isExam) return;
-                if (state.skipSections.has(name)) return;
+            if (isLeaf && count > 0) {
+                if (hasCheck || isLocked) return;
+                if (state.config.skipExams && isExam) { logSkipOnce(name, '单元检测（已开启跳过）'); return; }
+                if (state.skipSections.has(name)) { logSkipOnce(name, '在永久跳过列表中'); return; }
+                if (state.sessionSkipSections.has(name)) { logSkipOnce(name, '本次运行已失败跳过，重新加载页面会重试'); return; }
                 todoList.push({ idx, name, count, row });
             }
         });
@@ -697,8 +773,11 @@
             const statusText = (el.querySelector('.status-flex')?.innerText || el.innerText || '')
                 .replace(/\s+/g, ' ').trim();
             const isActive = el.classList.contains('is-active') || !!el.querySelector('.is-current');
-            const isFinish = !!el.querySelector('.is-finish, .is-finished, [class*="isfinish"]') ||
-                             statusText.includes('已完成') || statusText.includes('100%');
+            const statusEl = el.querySelector('.status-flex');
+            const isFinish = !!el.querySelector('.is-finish, .is-finished') ||
+                             hasStatusClassToken(el, /^(icon-)?is-?finish(ed)?$/i) ||
+                             statusText.includes('已完成') ||
+                             (!!statusEl && /100%/.test(statusEl.innerText || ''));
             return { i, name, statusText, isActive, isFinish, el };
         });
 
@@ -847,46 +926,107 @@
     }
 
     /**
-     * 处理 PPT 课件
+     * 读取 PPT 当前页/总页数：优先取子框架 postMessage，其次取页面页码文本
+     */
+    function readPptPageState() {
+        let current = 0, total = 0;
+        if (pptFrameState && pptFrameState.at && Date.now() - pptFrameState.at < 5000) {
+            current = pptFrameState.current || 0;
+            total = pptFrameState.total || 0;
+        }
+        if (!current || !total) {
+            const scope = document.querySelector('.pptContainer, .pptWrap, .previewContainer, .btnWrap') || document;
+            const m = (scope.innerText || '').match(/(\d{1,3})\s*[\/／]\s*(\d{1,3})/);
+            if (m) {
+                const c = parseInt(m[1], 10), t = parseInt(m[2], 10);
+                if (t > 0 && c > 0 && c <= t) { current = current || c; total = total || t; }
+            }
+        }
+        return { current, total };
+    }
+
+    /**
+     * 尝试推进 PPT 一页：按钮点击 + 键盘右箭头 + postMessage 三种方式兜底
+     */
+    function advancePptPage(nextPage) {
+        const nextBtn = document.querySelector('.pptContainer .toggle .pptBtn:last-child, .btnWrap .arrow-right, .btnWrap .pptBtn:last-child, [title*="下一页"], [title*="下一张"]');
+        if (nextBtn) {
+            try { nextBtn.click(); } catch (e) {}
+        }
+        const scope = document.querySelector('.pptContainer, .pptWrap, .previewContainer') || document.body;
+        try {
+            scope.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, bubbles: true }));
+        } catch (e) {}
+        pageWindow.postMessage({
+            currentPageNum: nextPage,
+            totalPageNum: nextPage,
+            data: { currentPageNum: nextPage, totalPageNum: nextPage }
+        }, '*');
+    }
+
+    /**
+     * 处理 PPT 课件：按真实页码逐页翻到末页后再上报完成，平台卡顿时也不会中途放弃
      */
     async function processPPTActivity(curName) {
         log(`正在处理 PPT 课件：【${curName}】`, 'info');
         await sleep(1500);
 
-        // 获取总页数 (如果存在页码显示)
-        const totalEl = document.querySelector('.pptContainer .page .total, .btnWrap .page');
-        let totalPages = 30;
-        if (totalEl) {
-            const m = (totalEl.innerText || '').match(/(\d+)\s*$/);
-            if (m) totalPages = Math.max(parseInt(m[1], 10), 2);
-        }
+        let { current, total: totalPages } = readPptPageState();
+        totalPages = totalPages > 0 ? totalPages : 30;
+        current = current > 0 ? current : 1;
 
-        // 1. 向当前窗口派发 PreviewPpt 监听的 postMessage 事件 (先发第 1 页解锁首屏标记，再发末页)
-        pageWindow.postMessage({
-            currentPageNum: 1,
-            totalPageNum: totalPages,
-            data: { currentPageNum: 1, totalPageNum: totalPages }
-        }, '*');
+        // 先发一次末页 postMessage，尝试让页面组件直接跳末页（快路径）
+        pageWindow.postMessage({ currentPageNum: 1, totalPageNum: totalPages, data: { currentPageNum: 1, totalPageNum: totalPages } }, '*');
         await sleep(300);
-        pageWindow.postMessage({
-            currentPageNum: totalPages,
-            totalPageNum: totalPages,
-            data: { currentPageNum: totalPages, totalPageNum: totalPages }
-        }, '*');
+        pageWindow.postMessage({ currentPageNum: totalPages, totalPageNum: totalPages, data: { currentPageNum: totalPages, totalPageNum: totalPages } }, '*');
+        await sleep(800);
 
-        // 2. 点击页面上的下一页按钮 (若存在)
-        const nextBtn = document.querySelector('.pptContainer .toggle .pptBtn:last-child, .btnWrap .arrow-right, .btnWrap .pptBtn:last-child');
-        if (nextBtn) {
-            for (let i = 0; i < Math.min(totalPages, 25); i++) {
-                nextBtn.click();
-                await sleep(80);
+        const first = readPptPageState();
+        if (first.total > 0) totalPages = first.total;
+        if (first.current > 0) current = first.current;
+        log(`PPT 初始页码：${current}/${totalPages}`, 'info');
+
+        const deadline = Date.now() + Math.min(90000, Math.max(20000, totalPages * 3500));
+        let lastCur = current, stuck = 0, iters = 0;
+        let reachedEnd = current >= totalPages;
+
+        while (state.config.running && Date.now() < deadline && !reachedEnd) {
+            iters++;
+            const before = readPptPageState();
+            if (before.total > 0) totalPages = before.total;
+            if (before.current > 0) current = before.current;
+            if (totalPages > 0 && current >= totalPages) { reachedEnd = true; break; }
+
+            advancePptPage(current + 1);
+            await sleep(700);
+
+            const after = readPptPageState();
+            const cur = after.current > 0 ? after.current : current;
+            if (after.total > 0) totalPages = after.total;
+            if (cur > current) {
+                current = cur;
+                stuck = 0;
+                if (iters % 3 === 0) log(`PPT 翻页中：${current}/${totalPages}`, 'info');
+            } else {
+                stuck++;
             }
+            if (totalPages > 0 && cur >= totalPages) { reachedEnd = true; break; }
+            if (stuck >= 6) {
+                log(`PPT 连续 ${stuck} 次未翻到下一页（当前 ${cur}/${totalPages}），尝试直报完成`, 'warn');
+                break;
+            }
+            lastCur = cur;
         }
 
-        // 3. 调用 Vue 进度上报接口保底
-        triggerVueStudyProcess({ total: totalPages, end: totalPages, type: '275003' });
-        log(`PPT 课件已完成：【${curName}】`, 'success');
-        await sleep(2500);
+        // 到达末页或兜底：多次调用 Vue 进度上报，避免平台卡顿导致上报丢失
+        for (let i = 0; i < 3; i++) {
+            triggerVueStudyProcess({ total: totalPages, end: totalPages, type: '275003' });
+            await sleep(600);
+        }
+        const final = readPptPageState();
+        const pct = final.total > 0 ? Math.round((final.current / final.total) * 100) : 100;
+        log(`PPT 课件已完成：【${curName}】（${final.current}/${final.total}，约 ${pct}%）`, reachedEnd ? 'success' : 'warn');
+        await sleep(1500);
     }
 
     /**
@@ -1726,6 +1866,34 @@
         }) || null;
     }
 
+    // 读取练习进度（如「第 3 题 / 共 5 题」「3/5」），用于「报告页 + 进度」双信号完成判定
+    function readPracticeProgress() {
+        const lib = document.querySelector('.SubjectLib');
+        if (!lib) return null;
+        const text = String(lib.innerText || '').replace(/\s+/g, ' ');
+        let m = text.match(/第\s*(\d+)\s*题\s*[\/／]?\s*共\s*(\d+)\s*题/);
+        if (m) {
+            const current = parseInt(m[1], 10);
+            const total = parseInt(m[2], 10);
+            if (total > 0 && current > 0 && current <= total) return { current, total };
+        }
+        m = text.match(/共\s*(\d+)\s*题[^0-9]{0,6}第\s*(\d+)\s*题/);
+        if (m) {
+            const total = parseInt(m[1], 10);
+            const current = parseInt(m[2], 10);
+            if (total > 0 && current > 0 && current <= total) return { current, total };
+        }
+        // 兜底：只认内容仅含「x/y」的独立进度元素，避免题干里的分数（如 1/2）被误判
+        const progressEl = Array.from(lib.querySelectorAll('span, div, p, i, em, b')).find(el =>
+            isVisibleEl(el) && /^\s*\d{1,3}\s*[\/／]\s*\d{1,3}\s*$/.test(String(el.innerText || '')));
+        if (progressEl) {
+            const parts = String(progressEl.innerText).trim().split(/[\/／]/).map(s => parseInt(s, 10));
+            const current = parts[0], total = parts[1];
+            if (total > 0 && total <= 200 && current > 0 && current <= total) return { current, total };
+        }
+        return null;
+    }
+
     // 核心：纯 DOM 驱动答题（题目出现 -> 取标准答案 -> 勾选 -> 选完了 -> 下一题/报告）
     async function autoAnswerPracticeDom() {
         if (!acquireAiLock()) {
@@ -1737,6 +1905,7 @@
         const maxQuestions = clampNumber(state.config.aiMaxQuestions, 1, 200, 50);
         const doneSigs = new Set();
         let answered = 0, correct = 0, wrong = 0, idle = 0;
+        let progressConfirmedDone = false;
 
         try {
             while (state.config.running && answered < maxQuestions) {
@@ -1746,17 +1915,22 @@
                 }
                 touchAiLock();
 
-                // 已全部作答（或恢复作答）时，平台会显示「显示报告」，直接进入报告
-                const reportBtn = findPracticeButton(/显示报告|查看报告/);
-                if (reportBtn) {
-                    fireHumanClick(reportBtn);
-                    log('已点击【显示报告】', 'info');
-                    await sleep(2000);
-                    continue;
+                // 先读当前题目/报告状态：报告页优先结束，避免残留的「查看报告」按钮被反复点击
+                const q = readPracticeQuestionDom();
+                if (q && q.over) {
+                    log('练习报告已显示，本节作答结束', 'info');
+                    break;
                 }
 
-                const q = readPracticeQuestionDom();
                 if (!q) {
+                    // 没有可读题目时，才允许点击「显示报告/查看报告」推进
+                    const reportBtn = findPracticeButton(/显示报告|查看报告/);
+                    if (reportBtn) {
+                        fireHumanClick(reportBtn);
+                        log('已点击【显示报告】', 'info');
+                        await sleep(2000);
+                        continue;
+                    }
                     idle++;
                     if (idle > 40) {
                         log('等待题目超时，结束本节作答', 'warn');
@@ -1765,13 +1939,25 @@
                     await sleep(900);
                     continue;
                 }
-                if (q.over) break;
                 idle = 0;
 
                 const sig = practiceQuestionSignature(q);
                 if (doneSigs.has(sig)) {
-                    // 作答完成后：最后一题会显示「显示报告」，中间题可能需点「下一题」
-                    const advanceBtn = findPracticeButton(/显示报告|查看报告|下一题/);
+                    // 双信号：进度已到最后一题且本题已提交，视为全部完成，不再继续点按钮
+                    const progress = readPracticeProgress();
+                    if (progress && progress.total > 0 && progress.current >= progress.total) {
+                        progressConfirmedDone = true;
+                        log(`双信号确认：进度 ${progress.current}/${progress.total}，本节题目已全部提交`, 'success');
+                        const reportBtn = findPracticeButton(/显示报告|查看报告/);
+                        if (reportBtn) {
+                            fireHumanClick(reportBtn);
+                            await sleep(1500);
+                        }
+                        break;
+                    }
+                    // 当前题已提交：优先点「下一题」继续后面的题，没有下一题才进入报告
+                    const advanceBtn = findPracticeButton(/下一题/) ||
+                        findPracticeButton(/显示报告|查看报告/);
                     if (advanceBtn) {
                         const label = (advanceBtn.innerText || '').trim();
                         fireHumanClick(advanceBtn);
@@ -1783,9 +1969,16 @@
                     continue;
                 }
 
-                const answers = await resolveAnswersForDom(q.items);
+                // AI 取答案失败时原地重试，避免单次抖动就带着未提交题目离开，触发「正在答题中」弹窗
+                let answers = null;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    answers = await resolveAnswersForDom(q.items);
+                    if (!answers.some(a => !a || !a.length)) break;
+                    log(`未能取得本题可靠答案，第 ${attempt + 1} 次重试…`, 'warn');
+                    await sleep(1500);
+                }
                 if (answers.some(a => !a || !a.length)) {
-                    log('未能取得本题可靠答案，暂停作答以避免错误率升高（请检查 AI 配置）', 'warn');
+                    log('连续 3 次未能取得本题可靠答案，留在当前页等待下轮重试（请检查 AI 配置）', 'warn');
                     snapshotPracticeDOM('no-answer');
                     break;
                 }
@@ -1837,8 +2030,13 @@
         }
 
         const over = !!(document.querySelector('.SubjectLib .Report'));
-        if (over) log(`本节练习作答完成：提交 ${answered} 题，正确 ${correct}，错误 ${wrong}`, 'success');
-        return { answered, correct, wrong, completed: over };
+        const completed = over || progressConfirmedDone;
+        if (completed) {
+            const progress = readPracticeProgress();
+            const suffix = progress ? `（进度 ${progress.current}/${progress.total}）` : '';
+            log(`本节练习作答完成${suffix}：提交 ${answered} 题，正确 ${correct}，错误 ${wrong}`, 'success');
+        }
+        return { answered, correct, wrong, completed };
     }
 
     // =========================================================================
@@ -3019,6 +3217,19 @@
         if (result && result.completed) {
             log(`练习已完成并返回目录：提交 ${result.answered} 题，正确 ${result.correct}，错误 ${result.wrong}`, 'success');
         }
+        // 仍有未答/未提交题目时不返回目录，避免触发「正在答题中」弹窗丢弃后面的题；
+        // 下一轮主循环会重新进入本节继续作答
+        try {
+            const stillActive = (() => {
+                if (state.evaluationRunning || document.querySelector('.CEDialog, .dialogBox')) return false;
+                const q = readPracticeQuestionDom();
+                return !!(q && !q.over);
+            })();
+            if (stillActive) {
+                log('本节练习仍有未答题目，留在当前页继续作答（不返回目录）', 'info');
+                return;
+            }
+        } catch (e) { /* ignore */ }
         await returnToCourseIndex();
     }
 
@@ -3055,16 +3266,18 @@
 
         // 1. 检查跳过名单与单元检测
         if (ch.curChapter && state.skipSections.has(ch.curChapter)) {
-            log(`小节【${ch.curChapter}】在异常跳过列表中，返回目录...`, 'warn');
+            log(`小节【${ch.curChapter}】在永久跳过列表中，返回目录...`, 'warn');
+            await returnToCourseIndex();
+            return;
+        }
+        if (ch.curChapter && state.sessionSkipSections.has(ch.curChapter)) {
+            log(`小节【${ch.curChapter}】本次运行已跳过，返回目录...`, 'info');
             await returnToCourseIndex();
             return;
         }
         if (state.config.skipExams && ch.isExam) {
-            log(`检测到单元检测【${ch.curChapter || ch.curName}】，自动跳过...`, 'warn');
-            if (ch.curChapter) {
-                state.skipSections.add(ch.curChapter);
-                saveSkipSections();
-            }
+            // 单元检测仅按当前设置跳过，不写入永久跳过列表，关闭该设置后可正常进入
+            log(`检测到单元检测【${ch.curChapter || ch.curName}】，按设置自动跳过...`, 'warn');
             await returnToCourseIndex();
             return;
         }
@@ -3077,6 +3290,7 @@
         // 2. 检查是否全部课件均已完成
         const allFinished = ch.items.every(it => it.isFinish);
         if (allFinished) {
+            if (ch.curChapter) state.sectionFailCount.delete(ch.curChapter);
             log(`★ 小节【${ch.curChapter}】全部 ${ch.totalItems} 个活动已完成！返回目录切换下一节`, 'success');
             await returnToCourseIndex();
             return;
@@ -3087,11 +3301,8 @@
         const candidates = unfinishedIndices.filter(idx => !state.processedInVisit.has(idx));
 
         if (candidates.length === 0 && unfinishedIndices.length > 0) {
-            log(`小节【${ch.curChapter}】所有未完成课件均已尝试处理，触发防死循环保护并跳过本节`, 'warn');
-            if (ch.curChapter) {
-                state.skipSections.add(ch.curChapter);
-                saveSkipSections();
-            }
+            log(`小节【${ch.curChapter}】所有未完成课件均已尝试处理，触发防死循环保护`, 'warn');
+            markSectionSkipped(ch.curChapter);
             await returnToCourseIndex();
             return;
         }
