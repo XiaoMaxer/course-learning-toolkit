@@ -1,2 +1,5 @@
-# 私有版本，不上传
-*.private.user.js
+# 中间产物：浏览器测试配置、登录态、日志、状态文件、Python 缓存
+__pycache__/
+_edge_*/
+_supervise*.log
+_supervise_*.json

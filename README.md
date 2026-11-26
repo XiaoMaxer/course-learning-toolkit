@@ -37,8 +37,13 @@
 
 ## 文件说明
 
-- `course-learning-toolkit.user.js`：可直接安装到 Tampermonkey 的完整脚本。
-- `README.md`：安装、配置与使用教程（末尾附开发者指南）。
+- `course-learning-toolkit.user.js`：公开版脚本，可直接安装到 Tampermonkey 使用。
+- `course-learning-toolkit.private.user.js`：私有版脚本，包含真机调试中的额外修复与兜底逻辑，仅用于本地测试，不保证稳定。
+- `_supervise.py`：基于 Playwright + Edge CDP 的看护工具，可注入脚本、读取面板状态与日志，并通过指令文件远程执行操作。
+- `_supervise_login.py`：清理登录态并打印 FIF 登录页各 frame 的表单结构，用于排查登录页改版。
+- `_test_runner.py`：非交互式真机测试，启动独立 Edge、注入脚本、点击开始刷课并观察日志。
+- `_test_course.py`：单课程真机测试，进入课程后自动刷课并采集控制台日志与面板状态。
+- `README.md`：安装、配置与使用教程（末尾附开发者指南与测试工具说明）。
 
 ## 〇、AI API Key 获取方式
 
@@ -282,3 +287,41 @@ API Key 保存在当前浏览器的油猴脚本存储及本地存储中，不会
 - 脚本头部 `@version` 每次改动必须递增，否则 Tampermonkey 可能把重新安装识别为同版本覆盖。
 - 每个版本在 GitHub **Releases** 发布：Release 说明写完整变更，Assets 附上 `course-learning-toolkit.user.js`。
 - README 不维护逐版更新记录，详细变更一律以 Release 说明为准。
+
+### A8. 本地真机测试工具
+
+仓库内的 `_supervise.py`、`_supervise_login.py`、`_test_runner.py`、`_test_course.py` 是一组本地真机调试脚本，用于在真实账号登录环境中验证私有版脚本的改动，不参与 Tampermonkey 安装，普通用户无需使用。
+
+**依赖**
+
+- Windows + Microsoft Edge，默认路径 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`；路径不同请修改脚本内的 `EDGE` / `EDGE_EXE` 常量。
+- Python 3.9+ 与 Playwright：`pip install playwright`。脚本直接驱动系统已安装的 Edge，无需执行 `playwright install`。
+- 测试脚本默认占用 CDP 端口 `9223`，并使用独立的浏览器 profile 目录启动 Edge，不影响日常浏览器配置。
+
+**安全约定**
+
+- 所有脚本内**不含任何账号、密码、Cookie 或 API Key**，登录必须由使用者本人在弹出的 Edge 窗口中手动完成。
+- 登录态、浏览器 profile、运行日志与状态 JSON 均为中间产物，已写入 `.gitignore`，不会进入版本库。
+
+**常用命令**（在仓库根目录执行）
+
+| 命令 | 作用 |
+| --- | --- |
+| `python -u _supervise.py` | 启动看护：打开 Edge，等待手动登录后注入私有版脚本，持续写状态与日志 |
+| `python -u _supervise.py --keep-login` | 复用已有登录态直接启动，不清理 Cookie |
+| `python -u _supervise_login.py` | 清理登录态并输出登录页表单结构，登录页改版时排查用 |
+| `python _test_runner.py [--login] [--duration N]` | 非交互式冒烟测试，观察 N 秒（默认 60） |
+| `python _test_course.py [--duration 180]` | 单课程测试，进入课程并采集指定秒数的日志 |
+
+**看护工具的控制文件**
+
+`_supervise.py` 运行后会持续维护以下中间文件，便于外部脚本或 AI 代理读取状态、下发指令：
+
+| 文件 | 说明 |
+| --- | --- |
+| `_supervise_status.json` | 每 3 秒刷新：时间、当前 URL、标题、面板是否运行、是否已注入、控制台尾部日志 |
+| `_supervise_cmd.json` | 指令输入：写入 `{"id":"唯一ID","action":"...","...":...}`，支持 `eval / click / set_input / inject / reload / goto / stop` |
+| `_supervise_result.json` | 指令执行结果，包含 `id` 与 `value` |
+| `_supervise_console.log` | 页面控制台全量日志，排查脚本运行问题时使用 |
+
+注入脚本前请确认 `course-learning-toolkit.private.user.js` 已通过 `node --check` 语法检查。
